@@ -1,0 +1,116 @@
+# =============================================================================
+# lib/cmd_bootstrap.sh — full deploy: render + up + wait + bucket create
+#
+# Idempotent — safe to re-run. Designed to be the single command operators
+# run after `init` (and after distributing cluster.env to all peers via
+# pair/join, when running multi-node).
+#
+# Stages:
+#   1. render templates for this node
+#   2. start etcd container
+#   3. start MinIO container
+#   4. wait for local services healthy
+#   5. start Milvus + nginx
+#   6. wait for full cluster convergence (only if not standalone)
+#   7. create the milvus-bucket if it doesn't exist
+# =============================================================================
+
+[[ -n "${_CMD_BOOTSTRAP_SH_LOADED:-}" ]] && return 0
+_CMD_BOOTSTRAP_SH_LOADED=1
+
+cmd_bootstrap() {
+  env_require
+  role_detect
+  role_validate_size
+
+  info "==> bootstrap on $NODE_NAME (cluster=$CLUSTER_NAME, size=$CLUSTER_SIZE)"
+
+  # --- Stage 1: render --------------------------------------------------
+  info "==> Stage 1/7: render templates"
+  render_all
+
+  # --- Stage 2: start etcd ----------------------------------------------
+  info "==> Stage 2/7: start etcd"
+  dc up -d etcd
+  _wait_for "local etcd" 60 etcd_local_health \
+    || warn "etcd not healthy locally — may still be forming quorum (normal until all peers up)"
+
+  # --- Stage 3: start MinIO ---------------------------------------------
+  info "==> Stage 3/7: start MinIO"
+  dc up -d minio
+
+  # In distributed mode, MinIO needs all peers reachable to form a cluster.
+  # In standalone mode, it's healthy immediately.
+  if role_is_standalone; then
+    _wait_for "local MinIO" 60 minio_local_healthy
+  else
+    info "  distributed MinIO — waiting for all peers to reach :${MINIO_API_PORT}"
+    _wait_peers_minio_reachable 120
+    _wait_for "MinIO cluster health" 120 minio_cluster_healthy \
+      || warn "MinIO cluster not yet healthy — may need more peers up"
+  fi
+
+  # --- Stage 4: start Milvus + nginx ------------------------------------
+  info "==> Stage 4/7: start Milvus"
+  dc up -d milvus
+
+  info "==> Stage 5/7: start nginx LB"
+  dc up -d nginx
+
+  # --- Stage 6: convergence ---------------------------------------------
+  if role_is_standalone; then
+    info "==> Stage 6/7: standalone — skipping cluster-wide convergence wait"
+  else
+    info "==> Stage 6/7: wait for cluster-wide convergence"
+    if ! cmd_wait --timeout-s=300; then
+      warn "cluster did not fully converge in 5 min — check \`milvus-onprem status\` on each peer"
+      warn "if peers haven't been bootstrapped yet, that's expected — re-run bootstrap once they are"
+    fi
+  fi
+
+  # --- Stage 7: create the bucket Milvus expects ------------------------
+  info "==> Stage 7/7: ensure milvus-bucket exists in MinIO"
+  if minio_local_healthy; then
+    minio_create_milvus_bucket
+  else
+    warn "local MinIO not healthy yet — bucket creation skipped; re-run bootstrap once cluster forms"
+  fi
+
+  ok "bootstrap complete on $NODE_NAME"
+  info "verify with: milvus-onprem status"
+  info "exercise with: milvus-onprem smoke   (once tests/ phase is in place)"
+}
+
+# Wait up to <secs> seconds for <fn> to return 0. Prints OK/FAIL.
+# Usage: _wait_for <label> <secs> <fn> [args...]
+_wait_for() {
+  local label="$1" timeout="$2"; shift 2
+  local i
+  for ((i=0; i<timeout; i++)); do
+    if "$@" >/dev/null 2>&1; then
+      ok "$label OK"
+      return 0
+    fi
+    sleep 1
+  done
+  warn "$label not ready after ${timeout}s"
+  return 1
+}
+
+_wait_peers_minio_reachable() {
+  local timeout="$1" i ip start
+  start=$(date +%s)
+  while (( $(date +%s) - start < timeout )); do
+    local all_up=1
+    for ((i=0; i<CLUSTER_SIZE; i++)); do
+      ip="${PEERS_ARR[$i]}"
+      if ! minio_peer_reachable "$ip"; then
+        all_up=0
+        break
+      fi
+    done
+    (( all_up )) && return 0
+    sleep 2
+  done
+  return 1
+}

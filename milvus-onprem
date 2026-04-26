@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# =============================================================================
+# milvus-onprem — single-binary CLI dispatcher
+#
+# Routes subcommands (init, render, up, down, status, wait, teardown,
+# bootstrap, ...) to lib/cmd_<name>.sh. Each cmd_* function handles its
+# own argument parsing.
+# =============================================================================
+
+set -euo pipefail
+
+# Resolve the repo root from this script's location, even via symlinks.
+REPO_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+export REPO_ROOT
+
+# Source order matters — log first, then env (uses log), then role (uses env), etc.
+source "$REPO_ROOT/lib/log.sh"
+source "$REPO_ROOT/lib/env.sh"
+source "$REPO_ROOT/lib/role.sh"
+source "$REPO_ROOT/lib/render.sh"
+source "$REPO_ROOT/lib/dc.sh"
+source "$REPO_ROOT/lib/etcd.sh"
+source "$REPO_ROOT/lib/minio.sh"
+source "$REPO_ROOT/lib/host.sh"
+source "$REPO_ROOT/lib/backup.sh"
+
+# Source every cmd_*.sh — each contributes a single command.
+for f in "$REPO_ROOT"/lib/cmd_*.sh; do
+  [[ -f "$f" ]] && source "$f"
+done
+
+usage() {
+  cat <<EOF
+Usage: milvus-onprem <command> [options]
+
+  init             Generate cluster.env on this node. Required first step.
+  render           Re-render templates after editing cluster.env.
+  up               Start all containers on this node.
+  down             Stop all containers on this node (data preserved).
+  bootstrap        Render + up + wait + create bucket. The "deploy everything" command.
+  status           Show this node + cluster health.
+  wait             Block until cluster fully converges.
+  teardown         Destructive: stop + wipe data. --full also removes cluster.env.
+
+  pair             (bootstrap node) Serve cluster.env to peers via HTTP rendezvous.
+  join             (other peers) Fetch cluster.env from bootstrap node and bootstrap.
+
+  backup-etcd      Snapshot the local etcd store to a .db file.
+  create-backup    Take a milvus-backup snapshot of the live data.
+  restore-backup   Import a milvus-backup snapshot (the 100GB-from-elsewhere case).
+
+  help             Show this message.
+
+For per-command help: milvus-onprem <command> --help
+
+Repo: https://github.com/codeadeel/milvus-onprem
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    init)            cmd_init            "$@" ;;
+    render)          cmd_render          "$@" ;;
+    up)              cmd_up              "$@" ;;
+    down)            cmd_down            "$@" ;;
+    bootstrap)       cmd_bootstrap       "$@" ;;
+    status)          cmd_status          "$@" ;;
+    wait)            cmd_wait            "$@" ;;
+    teardown)        cmd_teardown        "$@" ;;
+    pair)            cmd_pair            "$@" ;;
+    join)            cmd_join            "$@" ;;
+    backup-etcd)     cmd_backup_etcd     "$@" ;;
+    create-backup)   cmd_create_backup   "$@" ;;
+    restore-backup)  cmd_restore_backup  "$@" ;;
+    -h|--help|help)  usage ;;
+    *)               err "unknown command: $cmd"; usage; exit 1 ;;
+  esac
+}
+
+main "$@"
