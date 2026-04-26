@@ -35,12 +35,21 @@ EOF
     esac
   done
 
-  env_require
-  role_detect
+  # Teardown intentionally tolerates a broken or missing cluster.env: an
+  # operator who tripped a validation rule (e.g. 2.6/pulsar) needs a way
+  # out, and teardown is the escape hatch. We load if possible — to know
+  # DATA_ROOT and run dc down — but skip the strict validation that
+  # env_require imposes. If even loading fails, fall back to defaults.
+  if env_load 2>/dev/null; then
+    role_detect 2>/dev/null || true
+  else
+    warn "cluster.env missing or unloadable — proceeding with defaults"
+    : "${DATA_ROOT:=/data}"
+  fi
 
   warn "teardown level: $level"
   case "$level" in
-    data) warn "  will stop containers and wipe ${DATA_ROOT}/{etcd,minio,milvus}" ;;
+    data) warn "  will stop containers and wipe ${DATA_ROOT}/{etcd,minio,milvus,pulsar}" ;;
     full) warn "  will stop containers, wipe data, AND remove cluster.env + rendered/" ;;
   esac
 
@@ -50,14 +59,18 @@ EOF
   fi
 
   info "stopping containers"
-  dc down --remove-orphans --volumes || true
+  dc down --remove-orphans --volumes 2>/dev/null || {
+    # Fall back to a name-based sweep when no rendered compose exists
+    # (e.g. on a half-initialised node we're trying to recover).
+    docker rm -f milvus milvus-nginx milvus-minio milvus-etcd milvus-pulsar 2>/dev/null || true
+  }
 
   info "wiping data dirs under $DATA_ROOT"
-  sudo rm -rf "$DATA_ROOT/etcd" "$DATA_ROOT/minio" "$DATA_ROOT/milvus"
+  sudo rm -rf "$DATA_ROOT/etcd" "$DATA_ROOT/minio" "$DATA_ROOT/milvus" "$DATA_ROOT/pulsar"
 
   if [[ "$level" == "full" ]]; then
     info "removing cluster.env and rendered/"
-    rm -f "$CLUSTER_ENV"
+    rm -f "${CLUSTER_ENV:-$REPO_ROOT/cluster.env}"
     rm -rf "${RENDERED_DIR:-$REPO_ROOT/rendered}"
   fi
 

@@ -120,11 +120,16 @@ _env_validate_milvus_version() {
 
 # Reject MQ_TYPE values that don't make sense for the Milvus version.
 # 2.5: must be pulsar (no Woodpecker yet).
-# 2.6: woodpecker (recommended) or pulsar (less tested in this build).
+# 2.6: woodpecker only — the 2.6/pulsar trapdoor was open in env.sh but
+#      templates/2.6/ has no pulsar service block, so bootstrap died at
+#      Stage 3a with "no such service: pulsar". Closing it explicitly
+#      here so operators get a useful error at init/load time, not a
+#      cryptic compose error halfway through bootstrap.
 _env_validate_mq_type() {
   case "$MILVUS_VERSION/$MQ_TYPE" in
-    2.6/woodpecker|2.6/pulsar) ;;
+    2.6/woodpecker) ;;
     2.5/pulsar) ;;
+    2.6/pulsar) die "Milvus 2.6 + MQ_TYPE=pulsar is not wired up in this build — templates/2.6/ has no Pulsar service block. Use MQ_TYPE=woodpecker on 2.6 (the embedded WAL is the recommended path); to run Pulsar, use Milvus 2.5 (MILVUS_IMAGE_TAG=v2.5.x)." ;;
     2.5/woodpecker) die "Milvus 2.5 doesn't support Woodpecker (Woodpecker was introduced in 2.6). Set MQ_TYPE=pulsar in cluster.env." ;;
     *) die "unsupported (MILVUS_VERSION=$MILVUS_VERSION, MQ_TYPE=$MQ_TYPE) combination — see docs/CONFIG.md" ;;
   esac

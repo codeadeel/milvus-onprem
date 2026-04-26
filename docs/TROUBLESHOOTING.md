@@ -170,6 +170,47 @@ sudo chown -R 10000:10000 /data/pulsar
 docker start milvus-pulsar
 ```
 
+### Bootstrap dies with `no such service: pulsar` on Milvus 2.6
+
+You set `MQ_TYPE=pulsar` in cluster.env on a 2.6 deploy. The 2.6
+templates only ship a Woodpecker path — there's no Pulsar service
+block in `templates/2.6/docker-compose.yml.tpl`. As of this build the
+combination is rejected at `env_require` time with a clear message:
+
+```
+ERROR Milvus 2.6 + MQ_TYPE=pulsar is not wired up in this build ...
+```
+
+If you actually need Pulsar, run Milvus 2.5 instead
+(`MILVUS_IMAGE_TAG=v2.5.x`). 2.6's recommended path is the embedded
+Woodpecker WAL.
+
+### `teardown` errors out before it gets a chance to clean up
+
+If you tripped a config-validation rule (e.g. set MQ_TYPE wrong, or a
+hand-edited PEER_IPS that's no longer odd-count), `teardown` is
+deliberately lenient and will proceed even though normal commands
+refuse — that's its job as the escape hatch. If you're seeing the old
+behaviour where `teardown` itself bounces on validation, you're on a
+pre-fix build; pull main or sweep manually:
+
+```bash
+docker rm -f milvus milvus-nginx milvus-minio milvus-etcd milvus-pulsar
+sudo rm -rf /data/{etcd,minio,milvus,pulsar}
+rm -f cluster.env
+rm -rf rendered/
+```
+
+### `backup-etcd` errors with `exec: "rm": executable file not found in $PATH`
+
+Pre-fix symptom: snapshot file makes it to /tmp but `set -e` kills the
+function before it confirms, and `/data/etcd/snapshot.db` is left
+behind inside the etcd data dir. Cause: the etcd image is distroless
+and has no `rm` binary, so the post-snapshot in-container cleanup
+fails. Fixed by cleaning up via the bind mount (`sudo rm -f
+${DATA_ROOT}/etcd/snapshot.db`). If you're stuck on a pre-fix build,
+that same command clears the leftover.
+
 ---
 
 ## etcd issues

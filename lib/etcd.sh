@@ -142,7 +142,12 @@ etcd_backup() {
     --endpoints="http://127.0.0.1:${ETCD_CLIENT_PORT}" \
     snapshot save /etcd-data/snapshot.db
   docker cp milvus-etcd:/etcd-data/snapshot.db "$dst"
-  docker exec milvus-etcd rm -f /etcd-data/snapshot.db
+  # Clean up via the bind mount, not `docker exec rm`: the official etcd
+  # image is distroless and has no `rm` binary, so an in-container delete
+  # fails with "exec: \"rm\": executable file not found in $PATH" and
+  # `set -e` kills this function before `ok`/`echo "$dst"` can run.
+  # /etcd-data inside the container is just ${DATA_ROOT}/etcd on the host.
+  sudo rm -f "${DATA_ROOT}/etcd/snapshot.db"
   ok "saved to $dst"
   echo "$dst"
 }
