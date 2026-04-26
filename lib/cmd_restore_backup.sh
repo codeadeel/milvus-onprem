@@ -60,11 +60,25 @@ cmd_restore_backup() {
   else
     [[ -n "$from_path" ]] || die "--from is required (or use --skip-upload --name)"
     [[ -d "$from_path" ]] || die "$from_path does not exist or isn't a directory"
+    from_path="$(cd "$from_path" && pwd)"            # canonical absolute
     [[ -z "$name" ]] && name="$(basename "$from_path")"
 
     info "==> uploading $from_path → MinIO at milvus-bucket/backup/$name/"
     info "    (this is the slow step for large backups)"
-    minio_mc mirror "$from_path" "local/milvus-bucket/backup/$name/"
+
+    # mc inside the milvus-minio container can't see host paths. Two-step:
+    # docker cp host → container, then mc mirror container → MinIO.
+    local container_tmp="/tmp/onprem-import-${name}-$$"
+    docker exec milvus-minio mkdir -p "$container_tmp"
+    if ! docker cp "${from_path}/." "milvus-minio:${container_tmp}/"; then
+      docker exec milvus-minio rm -rf "$container_tmp" 2>/dev/null
+      die "docker cp from host into MinIO container failed"
+    fi
+    if ! minio_mc mirror --quiet "${container_tmp}/" "local/milvus-bucket/backup/${name}/" >/dev/null; then
+      docker exec milvus-minio rm -rf "$container_tmp" 2>/dev/null
+      die "mc mirror inside MinIO container failed"
+    fi
+    docker exec milvus-minio rm -rf "$container_tmp" 2>/dev/null
     ok "upload complete"
   fi
 

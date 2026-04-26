@@ -11,8 +11,6 @@
 # an empty block and just connect to Pulsar across the network.
 # =============================================================================
 
-version: "3.8"
-
 services:
 
   # --- etcd: ${CLUSTER_SIZE}-node Raft cluster ----------------------------

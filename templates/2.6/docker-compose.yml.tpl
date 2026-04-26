@@ -9,8 +9,6 @@
 # lives under ${DATA_ROOT}/<component>/ on this host.
 # =============================================================================
 
-version: "3.8"
-
 services:
 
   # --- etcd: ${CLUSTER_SIZE}-node Raft cluster ----------------------------

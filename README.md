@@ -78,8 +78,8 @@ For the full walkthrough with diagrams, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT
 
 ## What you get
 
-- **Single CLI** — 13 commands covering deploy, status, scale, backup,
-  teardown.
+- **Single CLI** — 14 commands covering deploy, status, scale, backup
+  (create / export / restore / etcd-snapshot), teardown.
 - **N-node from day 1** — 1 (standalone), 3, 5, 7, 9. Even sizes are
   rejected (no Raft quorum).
 - **Auto-failover for single-VM loss** — etcd Raft handles it, no
