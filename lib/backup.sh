@@ -14,13 +14,19 @@
 [[ -n "${_BACKUP_SH_LOADED:-}" ]] && return 0
 _BACKUP_SH_LOADED=1
 
-: "${MILVUS_BACKUP_VERSION:=v0.5.4}"
+: "${MILVUS_BACKUP_VERSION:=v0.5.14}"
 : "${MILVUS_BACKUP_BIN_DIR:=$REPO_ROOT/.local/bin}"
 MILVUS_BACKUP_BIN="$MILVUS_BACKUP_BIN_DIR/milvus-backup"
 
 
 # Download the upstream milvus-backup binary into the cache dir if not
 # already there. Idempotent — safe to call from every command.
+#
+# Asset URL pattern (verified against zilliztech/milvus-backup v0.5.14):
+#   .../<vX.Y.Z>/milvus-backup_<X.Y.Z>_<Linux|Darwin>_<x86_64|arm64>.tar.gz
+# Note the asset filename embeds the version (without leading `v`) and
+# uses capitalized OS + x86_64-style arch — older releases (≤ v0.5.4)
+# used a different convention that the upstream switched away from.
 backup_download_binary() {
   if [[ -x "$MILVUS_BACKUP_BIN" ]]; then
     info "milvus-backup binary cached at $MILVUS_BACKUP_BIN"
@@ -29,23 +35,29 @@ backup_download_binary() {
 
   mkdir -p "$MILVUS_BACKUP_BIN_DIR"
 
-  local arch os
-  arch="$(uname -m)"
-  case "$arch" in
-    x86_64)         arch="amd64" ;;
+  local arch
+  case "$(uname -m)" in
+    x86_64)         arch="x86_64" ;;
     aarch64|arm64)  arch="arm64" ;;
-    *)              die "unsupported arch: $arch" ;;
+    *)              die "unsupported arch: $(uname -m)" ;;
   esac
-  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
-  local url="https://github.com/zilliztech/milvus-backup/releases/download/${MILVUS_BACKUP_VERSION}/milvus-backup_${os}_${arch}.tar.gz"
+  local os
+  case "$(uname -s)" in
+    Linux)   os="Linux" ;;
+    Darwin)  os="Darwin" ;;
+    *)       die "unsupported OS: $(uname -s)" ;;
+  esac
+
+  local ver_clean="${MILVUS_BACKUP_VERSION#v}"
+  local url="https://github.com/zilliztech/milvus-backup/releases/download/${MILVUS_BACKUP_VERSION}/milvus-backup_${ver_clean}_${os}_${arch}.tar.gz"
 
   info "downloading milvus-backup ${MILVUS_BACKUP_VERSION}"
   info "  $url"
   local tmp; tmp="$(mktemp -d)"
   if ! curl -sfL "$url" -o "$tmp/milvus-backup.tgz"; then
     rm -rf "$tmp"
-    die "download failed — set MILVUS_BACKUP_VERSION to a known release tag, or download manually into $MILVUS_BACKUP_BIN"
+    die "download failed — set MILVUS_BACKUP_VERSION to a known release tag (latest as of $(date +%Y-%m): v0.5.14), or download manually into $MILVUS_BACKUP_BIN"
   fi
   tar -xzf "$tmp/milvus-backup.tgz" -C "$tmp"
   install -m 0755 "$tmp/milvus-backup" "$MILVUS_BACKUP_BIN"

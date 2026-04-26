@@ -16,22 +16,30 @@ cmd_create_backup() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --name=*)        name="${1#*=}"; shift ;;
-      --name)          name="$2"; shift 2 ;;
-      --collections=*) collections="${1#*=}"; shift ;;
-      --collections)   collections="$2"; shift 2 ;;
-      --list)          list_only=1; shift ;;
+      --name=*)                 name="${1#*=}"; shift ;;
+      --name)                   name="$2"; shift 2 ;;
+      --collections=*)          collections="${1#*=}"; shift ;;
+      --collections)            collections="$2"; shift 2 ;;
+      --milvus-backup-version=*) MILVUS_BACKUP_VERSION="${1#*=}"; export MILVUS_BACKUP_VERSION; shift ;;
+      --milvus-backup-version)   MILVUS_BACKUP_VERSION="$2"; export MILVUS_BACKUP_VERSION; shift 2 ;;
+      --list)                   list_only=1; shift ;;
       -h|--help)
         cat <<EOF
-Usage: milvus-onprem create-backup --name=NAME [--collections=A,B,C]
+Usage: milvus-onprem create-backup --name=NAME [OPTIONS]
        milvus-onprem create-backup --list
 
 Create a milvus-backup snapshot of the live cluster's data.
 
-  --name=NAME         (required) Backup name. Stored in MinIO under
-                      milvus-bucket/backup/<name>/.
-  --collections=...   Comma-separated list of collections. Default: all.
-  --list              List existing backups instead of creating one.
+  --name=NAME                    (required) Backup name. Stored in MinIO under
+                                 milvus-bucket/backup/<name>/.
+  --collections=A,B,C            Comma-separated list of collections. Default: all.
+  --milvus-backup-version=vX.Y.Z Override the upstream milvus-backup binary
+                                 version. Default: v0.5.14. Also settable via
+                                 the MILVUS_BACKUP_VERSION env var.
+                                 NB: the binary is cached at
+                                 ~/milvus-onprem/.local/bin/milvus-backup;
+                                 to switch versions, rm the cached binary first.
+  --list                         List existing backups instead of creating one.
 
 After creation, the backup lives in MinIO and can be:
   - listed:    milvus-onprem create-backup --list

@@ -23,15 +23,17 @@ cmd_restore_backup() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --from=*)            from_path="${1#*=}"; shift ;;
-      --from)              from_path="$2"; shift 2 ;;
-      --name=*)            name="${1#*=}"; shift ;;
-      --name)              name="$2"; shift 2 ;;
-      --rename=*)          rename_pairs="${1#*=}"; shift ;;
-      --rename)            rename_pairs="$2"; shift 2 ;;
-      --skip-upload)       skip_upload=1; shift ;;
-      --no-restore-index)  restore_index=0; shift ;;
-      --version)           version_only=1; shift ;;
+      --from=*)                  from_path="${1#*=}"; shift ;;
+      --from)                    from_path="$2"; shift 2 ;;
+      --name=*)                  name="${1#*=}"; shift ;;
+      --name)                    name="$2"; shift 2 ;;
+      --rename=*)                rename_pairs="${1#*=}"; shift ;;
+      --rename)                  rename_pairs="$2"; shift 2 ;;
+      --milvus-backup-version=*) MILVUS_BACKUP_VERSION="${1#*=}"; export MILVUS_BACKUP_VERSION; shift ;;
+      --milvus-backup-version)   MILVUS_BACKUP_VERSION="$2"; export MILVUS_BACKUP_VERSION; shift 2 ;;
+      --skip-upload)             skip_upload=1; shift ;;
+      --no-restore-index)        restore_index=0; shift ;;
+      --show-cached)             version_only=1; shift ;;
       -h|--help)
         _restore_backup_help
         return 0
@@ -93,26 +95,39 @@ _restore_backup_help() {
 Usage: milvus-onprem restore-backup [--from=PATH | --skip-upload --name=NAME]
                                     [--rename=A:B[,C:D,...]]
                                     [--no-restore-index]
-                                    [--version]
+                                    [--milvus-backup-version=vX.Y.Z]
+                                    [--show-cached]
 
 Import a milvus-backup snapshot into the cluster.
 
 UPLOAD SOURCE (one of):
-  --from=PATH            Filesystem path to a backup dir created elsewhere.
-                         Mirrored into our MinIO before restore.
-  --skip-upload          The backup is already in our MinIO. Use with --name.
+  --from=PATH                    Filesystem path to a backup dir created
+                                 elsewhere. Mirrored into our MinIO
+                                 before restore.
+  --skip-upload                  The backup is already in our MinIO. Use
+                                 with --name.
 
 NAMING:
-  --name=NAME            Backup name. Required with --skip-upload.
-                         Otherwise derived from the basename of --from.
-  --rename=A:B[,...]     Restore collection A as B (rename during restore).
+  --name=NAME                    Backup name. Required with --skip-upload.
+                                 Otherwise derived from the basename of
+                                 --from.
+  --rename=A:B[,...]             Restore collection A as B (rename during
+                                 restore).
 
 INDEX:
-  --no-restore-index     Skip index rebuild. Faster, but you must
-                         re-create indexes manually afterward.
+  --no-restore-index             Skip index rebuild. Faster, but you must
+                                 re-create indexes manually afterward.
 
-OTHER:
-  --version              Print the milvus-backup binary version + path.
+UPSTREAM BINARY:
+  --milvus-backup-version=vX.Y.Z Override the upstream milvus-backup
+                                 binary version. Default: v0.5.14. Also
+                                 settable via the MILVUS_BACKUP_VERSION
+                                 env var. NB: the binary is cached at
+                                 ~/milvus-onprem/.local/bin/milvus-backup;
+                                 to switch versions, rm the cached binary
+                                 first.
+  --show-cached                  Print the cached binary's path + version
+                                 metadata, then exit. Doesn't run a restore.
 
 Typical 100 GB-from-developer scenario:
   scp -r dev_backup operator@node-1:~/dev_backup
