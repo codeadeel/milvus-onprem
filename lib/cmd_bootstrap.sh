@@ -9,10 +9,15 @@
 #   1. render templates for this node
 #   2. start etcd container
 #   3. start MinIO container
-#   4. wait for local services healthy
-#   5. start Milvus + nginx
+#   3a. start Pulsar broker      (Milvus 2.5 only, on PULSAR_HOST)
+#   4. start Milvus
+#   5. start nginx LB
 #   6. wait for full cluster convergence (only if not standalone)
 #   7. create the milvus-bucket if it doesn't exist
+#
+# The Pulsar sub-stage is a no-op for 2.6 (Woodpecker is embedded) and
+# for non-PULSAR_HOST peers in a 2.5 cluster (they connect across the
+# network to the singleton).
 # =============================================================================
 
 [[ -n "${_CMD_BOOTSTRAP_SH_LOADED:-}" ]] && return 0
@@ -48,6 +53,23 @@ cmd_bootstrap() {
     _wait_peers_minio_reachable 120
     _wait_for "MinIO cluster health" 120 minio_cluster_healthy \
       || warn "MinIO cluster not yet healthy — may need more peers up"
+  fi
+
+  # --- Stage 3a: start Pulsar (2.5 only, on PULSAR_HOST) ----------------
+  # Milvus 2.5 needs Pulsar reachable before its coordinators come up;
+  # otherwise rootcoord/datacoord loop on "find no available rootcoord"
+  # and the container never reports healthy. Pulsar is a singleton on
+  # PULSAR_HOST, so only that one node actually starts it; other peers
+  # in a multi-node 2.5 cluster connect across the network.
+  if [[ "${MQ_TYPE:-}" == "pulsar" && "$NODE_NAME" == "${PULSAR_HOST:-node-1}" ]]; then
+    info "==> Stage 3a/7: start Pulsar (singleton on $NODE_NAME)"
+    dc up -d pulsar
+    # Pulsar's own healthcheck has a 90s start_period; the broker port
+    # usually accepts TCP within ~30-60s. We just need it reachable
+    # before Milvus's coordinators try to dial it.
+    _wait_for "Pulsar broker @${PULSAR_HOST_IP:-127.0.0.1}:${PULSAR_BROKER_PORT}" 180 \
+              _pulsar_broker_reachable \
+      || warn "Pulsar not reachable yet — Milvus may need a few restarts to catch up"
   fi
 
   # --- Stage 4: start Milvus + nginx ------------------------------------
@@ -113,4 +135,12 @@ _wait_peers_minio_reachable() {
     sleep 2
   done
   return 1
+}
+
+# Pulsar broker TCP probe — used during bootstrap to gate Milvus startup
+# behind a reachable broker. We probe the resolved PULSAR_HOST_IP rather
+# than the literal `pulsar` hostname so it works on host networking.
+_pulsar_broker_reachable() {
+  local ip="${PULSAR_HOST_IP:-127.0.0.1}"
+  timeout 3 bash -c "</dev/tcp/$ip/${PULSAR_BROKER_PORT}" 2>/dev/null
 }

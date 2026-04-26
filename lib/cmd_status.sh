@@ -33,9 +33,16 @@ _status_header() {
 _status_containers() {
   echo
   echo "==> containers on $NODE_NAME"
-  if docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' \
-       | grep -E '^(NAMES|milvus(-|$))' ; then
-    :
+  # Use docker's --filter rather than grep: the table format pads names
+  # with trailing spaces, so a regex like `milvus$` never matches the
+  # lone `milvus` container, only `milvus-*`. --filter "name=^milvus"
+  # matches `milvus`, `milvus-etcd`, `milvus-minio`, `milvus-nginx`,
+  # `milvus-pulsar` cleanly.
+  local out
+  out=$(docker ps -a --filter 'name=^milvus' \
+        --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}')
+  if [[ -n "$out" && $(printf '%s\n' "$out" | wc -l) -gt 1 ]]; then
+    printf '%s\n' "$out"
   else
     warn "  no milvus-* containers found — run \`milvus-onprem up\`"
   fi

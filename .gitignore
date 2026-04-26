@@ -45,3 +45,9 @@ data/
 # Sentinel / state files written by lifecycle commands
 .peer-down-alert
 .bootstrap-complete
+
+# Runtime logs (e.g. milvus-backup writes ./logs/backup.log into CWD)
+logs/
+
+# Local Claude Code project context — operator-specific, not for the repo
+CLAUDE.md

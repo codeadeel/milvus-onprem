@@ -141,6 +141,35 @@ Milvus can't reach etcd. Check:
   If this fails, peer etcds aren't reachable — check
   `nc -zv <peer-ip> 2379` from this node.
 
+### Milvus 2.5: `find no available rootcoord, check rootcoord state`
+
+Symptom: on a fresh 2.5 deploy the `milvus` container never reports
+healthy and the logs spam `RootCoordClient mess key not exist` and
+`find no available rootcoord`.
+
+Root cause: Milvus 2.5 needs Pulsar reachable before its coordinators
+come up. If `milvus-pulsar` was never started (or is still in its 90s
+healthcheck `start_period`), rootcoord/datacoord loop forever.
+
+`milvus-onprem bootstrap` now starts Pulsar (Stage 3a) before Milvus
+on the `PULSAR_HOST` node and waits up to 180s for the broker port to
+accept TCP. If you somehow ended up with Pulsar down on a 2.5 deploy,
+restart it:
+
+```bash
+docker start milvus-pulsar
+docker restart milvus           # so coordinators retry immediately
+```
+
+If Pulsar itself fails to start, check `docker logs milvus-pulsar` —
+the most common cause is `/data/pulsar` ownership: Pulsar runs as
+UID 10000 inside the container.
+
+```bash
+sudo chown -R 10000:10000 /data/pulsar
+docker start milvus-pulsar
+```
+
 ---
 
 ## etcd issues
