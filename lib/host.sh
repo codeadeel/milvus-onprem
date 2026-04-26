@@ -14,7 +14,8 @@ _HOST_SH_LOADED=1
 host_prep() {
   local data="$1"
   info "host prep: ensuring $data exists with the right ownership"
-  sudo mkdir -p "$data/etcd" "$data/minio" "$data/milvus"
-  sudo chown -R 1000:1000 "$data/etcd" "$data/minio"
+  sudo mkdir -p "$data/etcd" "$data/minio" "$data/milvus" "$data/pulsar"
+  sudo chown -R 1000:1000  "$data/etcd" "$data/minio"
+  sudo chown -R 10000:10000 "$data/pulsar"
   sudo chown -R "$(id -u):$(id -g)" "$data/milvus"
 }

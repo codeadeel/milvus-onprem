@@ -25,6 +25,10 @@ render_all() {
   for tpl in "$src_dir"/*.tpl; do
     [[ -f "$tpl" ]] || continue
     base="$(basename "$tpl" .tpl)"
+    # Files starting with _ are fragment templates (e.g. _pulsar-service.yml.tpl).
+    # They get inlined into other templates via _render_compute_derived,
+    # not rendered as standalone files.
+    [[ "$base" == _* ]] && continue
     _render_one "$tpl" "$out_dir/$base"
     info "  rendered $out_dir/$base"
   done
@@ -44,13 +48,16 @@ _render_var_list() {
            MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_REGION \
            MILVUS_VERSION \
            MILVUS_IMAGE_TAG ETCD_IMAGE_TAG MINIO_IMAGE_TAG NGINX_IMAGE_TAG \
+           PULSAR_IMAGE_TAG \
            ETCD_CLIENT_PORT ETCD_PEER_PORT \
            MINIO_API_PORT MINIO_CONSOLE_PORT \
            MILVUS_PORT MILVUS_HEALTHZ_PORT NGINX_LB_PORT \
+           PULSAR_BROKER_PORT PULSAR_HTTP_PORT \
            ETCD_INITIAL_CLUSTER ETCD_INITIAL_CLUSTER_STATE \
            MINIO_VOLUMES MINIO_SERVER_CMD \
            NGINX_UPSTREAM_BLOCK \
-           MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML; do
+           MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML \
+           PULSAR_HOST PULSAR_HOST_IP PULSAR_SERVICE_BLOCK; do
     printf '${%s} ' "$v"
   done
 }
@@ -111,8 +118,38 @@ _render_compute_derived() {
   # rather than bootstrapping fresh.
   : "${ETCD_INITIAL_CLUSTER_STATE:=new}"
 
+  # Pulsar singleton — only relevant when MQ_TYPE=pulsar (Milvus 2.5).
+  # PULSAR_HOST_IP is the IP of the node hosting the Pulsar singleton.
+  # PULSAR_SERVICE_BLOCK is the docker-compose service block, populated
+  # only when this node IS the pulsar host. Other nodes get an empty
+  # block and just connect to PULSAR_HOST_IP across the network.
+  PULSAR_HOST_IP=""
+  PULSAR_SERVICE_BLOCK=""
+  if [[ "${MQ_TYPE:-}" == "pulsar" ]]; then
+    local i
+    for ((i=0; i<CLUSTER_SIZE; i++)); do
+      if [[ "${PEER_NAMES[$i]}" == "${PULSAR_HOST:-node-1}" ]]; then
+        PULSAR_HOST_IP="${PEERS_ARR[$i]}"
+        break
+      fi
+    done
+
+    if [[ "$NODE_NAME" == "${PULSAR_HOST:-node-1}" ]]; then
+      local fragment="$REPO_ROOT/templates/$MILVUS_VERSION/_pulsar-service.yml.tpl"
+      if [[ -f "$fragment" ]]; then
+        # Pre-render the fragment with the same var list so its ${VAR}s resolve.
+        # The result is captured as a literal block that the main compose
+        # template's ${PULSAR_SERVICE_BLOCK} will substitute in verbatim.
+        # Naming convention: fragments start with `_` so render_all skips them
+        # as standalone files.
+        PULSAR_SERVICE_BLOCK="$(envsubst "$(_render_var_list)" < "$fragment")"
+      fi
+    fi
+  fi
+
   export ETCD_INITIAL_CLUSTER ETCD_INITIAL_CLUSTER_STATE \
          MINIO_VOLUMES MINIO_SERVER_CMD \
          NGINX_UPSTREAM_BLOCK \
-         MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML
+         MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML \
+         PULSAR_HOST_IP PULSAR_SERVICE_BLOCK
 }
