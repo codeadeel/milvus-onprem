@@ -46,7 +46,8 @@ Usage: milvus-onprem <command> [options]
   join             (other peers) Fetch cluster.env from bootstrap node and bootstrap.
 
   backup-etcd      Snapshot the local etcd store to a .db file.
-  create-backup    Take a milvus-backup snapshot of the live data.
+  create-backup    Take a milvus-backup snapshot of the live data (stored in MinIO).
+  export-backup    Copy a backup from MinIO to a filesystem dir (USB / NFS / off-site).
   restore-backup   Import a milvus-backup snapshot (the 100GB-from-elsewhere case).
 
   help             Show this message.
@@ -74,6 +75,7 @@ main() {
     join)            cmd_join            "$@" ;;
     backup-etcd)     cmd_backup_etcd     "$@" ;;
     create-backup)   cmd_create_backup   "$@" ;;
+    export-backup)   cmd_export_backup   "$@" ;;
     restore-backup)  cmd_restore_backup  "$@" ;;
     -h|--help|help)  usage ;;
     *)               err "unknown command: $cmd"; usage; exit 1 ;;
