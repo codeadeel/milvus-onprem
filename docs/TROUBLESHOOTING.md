@@ -185,17 +185,81 @@ The distributed MinIO cluster hasn't finished forming yet. Wait a
 minute and retry. `bootstrap` includes a wait helper that handles
 this; if you're running mc commands manually, give it 60-120s.
 
-### `restore-backup`: `failed to download milvus-backup`
+---
 
-The release URL didn't match. Either the version pinned in
-`lib/backup.sh` is gone, or the asset name format changed. Override:
+## milvus-backup issues
+
+### `download failed — set MILVUS_BACKUP_VERSION to a known release tag`
+
+The upstream `milvus-backup` release URL or asset name pattern
+changed. Two options:
 
 ```bash
-MILVUS_BACKUP_VERSION=v0.5.4 ./milvus-onprem restore-backup --from ~/dev_export
+# 1. override the version (latest verified working tag is v0.5.14):
+./milvus-onprem create-backup --name=foo --milvus-backup-version=v0.5.14
+
+# 2. download manually and stash the binary in the cache dir:
+curl -sL https://github.com/zilliztech/milvus-backup/releases/.../milvus-backup_X.Y.Z_Linux_x86_64.tar.gz \
+  | tar -xz -C /tmp
+install -m 0755 /tmp/milvus-backup ~/milvus-onprem/.local/bin/
 ```
 
-Or download the binary manually into `~/milvus-onprem/.local/bin/milvus-backup`
-(chmod +x), then re-run.
+The asset filename pattern as of v0.5.14 is
+`milvus-backup_<X.Y.Z>_<Linux|Darwin>_<x86_64|arm64>.tar.gz` (capitalized
+OS, x86_64-style arch, version embedded). If a future release breaks
+this assumption again, the fix lives in `lib/backup.sh`.
+
+### `Error: invalid backup name <name>`
+
+milvus-backup tightened name validation in v0.5.x. Hyphens are no
+longer accepted; use only alphanumerics + underscores. So `daily-backup`
+fails but `daily_backup` works.
+
+### `Unable to stat source <host-path>` during restore-backup --from
+
+`mc` runs **inside** the milvus-minio container and can't see host
+filesystem paths directly. The CLI handles this internally via
+`docker cp` host → container → MinIO. If you see this error, you're
+running an older version of `lib/cmd_restore_backup.sh` — pull
+the latest commit.
+
+### `restore-backup` fails with `restore: collection already exist`
+
+milvus-backup refuses to overwrite live collections. Use:
+
+```bash
+./milvus-onprem restore-backup --from=PATH --drop-existing
+```
+
+`--drop-existing` drops every collection in the live cluster before
+the restore. Requires pymilvus on the host.
+
+### `create-backup` fails on flush (Milvus 2.5)
+
+Milvus 2.5 needs Pulsar to flush. If the Pulsar singleton is down at
+backup time, the default flush-then-backup path fails. The CLI checks
+this proactively when `MQ_TYPE=pulsar`:
+
+```
+ERROR Pulsar broker at 10.0.0.10:6650 is unreachable.
+```
+
+Two ways forward:
+
+1. Bring Pulsar back: `docker start milvus-pulsar` on the PULSAR_HOST node.
+2. Skip the flush, back up what's on disk:
+   `./milvus-onprem create-backup --name=foo --strategy=skip_flush`
+   (Loses very recent writes still in the WAL.)
+
+Milvus 2.6 (Woodpecker) doesn't have this concern — the WAL is
+embedded in every Milvus instance.
+
+### milvus-backup config errors / `config: backup.yaml`
+
+milvus-backup v0.5.x uses YAML, not TOML. The CLI generates
+`backup.yaml` automatically. If you're seeing a TOML-related error,
+you're on an older checkout — pull the latest. The file is rendered
+at `~/milvus-onprem/.local/backup.yaml` per invocation.
 
 ---
 

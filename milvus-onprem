@@ -52,6 +52,9 @@ Usage: milvus-onprem <command> [options]
 
   smoke            Run the end-to-end smoke test (replica_number auto-derived).
   version          Show CLI + configured-cluster version info.
+  urls             Print the connection URLs (LB, MinIO console, etc.).
+  ps               Show running milvus-* containers (filtered docker ps).
+  logs             Tail logs for a component (etcd / minio / milvus / nginx / pulsar).
 
   help             Show this message.
 
@@ -82,6 +85,9 @@ main() {
     restore-backup)  cmd_restore_backup  "$@" ;;
     smoke)           cmd_smoke           "$@" ;;
     version)         cmd_version         "$@" ;;
+    urls)            cmd_urls            "$@" ;;
+    ps)              cmd_ps              "$@" ;;
+    logs)            cmd_logs            "$@" ;;
     -h|--help|help)  usage ;;
     *)               err "unknown command: $cmd"; usage; exit 1 ;;
   esac

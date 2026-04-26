@@ -54,10 +54,10 @@ EOF
   # Cached external binaries.
   echo "Cached binaries:"
   if [[ -x "${MILVUS_BACKUP_BIN:-}" ]]; then
-    local mb_ver
-    mb_ver="$("${MILVUS_BACKUP_BIN}" --help 2>&1 | head -1 | awk '{print $1}')"
-    echo "  milvus-backup: ${mb_ver:-unknown}  ($MILVUS_BACKUP_BIN)"
+    # Don't invoke the binary — some versions exit non-zero on --help and
+    # `set -e` would kill us. Just report the version we asked for.
+    echo "  milvus-backup: $MILVUS_BACKUP_VERSION  ($MILVUS_BACKUP_BIN)"
   else
-    echo "  milvus-backup: not yet downloaded"
+    echo "  milvus-backup: not yet downloaded (will fetch $MILVUS_BACKUP_VERSION on first use)"
   fi
 }

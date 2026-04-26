@@ -63,10 +63,16 @@ EOF
     die "pymilvus not installed. Run: pip3 install --user --break-system-packages -r test/requirements.txt"
   fi
 
-  REPLICAS="$replicas" \
-  ${rows:+NUM_ROWS="$rows"} \
-  ${dim:+DIM="$dim"} \
-  ${coll:+MILVUS_COLL="$coll"} \
-  MILVUS_URI="http://127.0.0.1:${NGINX_LB_PORT}" \
-  python3 "$script"
+  # Build env vars as an array so empty optional flags don't corrupt
+  # the command line. (The `${var:+...}` line-continuation form parses
+  # weirdly when several optionals are simultaneously empty.)
+  local -a envs=(
+    "REPLICAS=$replicas"
+    "MILVUS_URI=http://127.0.0.1:${NGINX_LB_PORT}"
+  )
+  [[ -n "$rows" ]] && envs+=("NUM_ROWS=$rows")
+  [[ -n "$dim"  ]] && envs+=("DIM=$dim")
+  [[ -n "$coll" ]] && envs+=("MILVUS_COLL=$coll")
+
+  env "${envs[@]}" python3 "$script"
 }

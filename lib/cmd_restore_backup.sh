@@ -21,6 +21,7 @@ cmd_restore_backup() {
   local restore_index=1
   local version_only=0
   local auto_load=0
+  local drop_existing=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,6 +35,7 @@ cmd_restore_backup() {
       --milvus-backup-version)   MILVUS_BACKUP_VERSION="$2"; export MILVUS_BACKUP_VERSION; shift 2 ;;
       --skip-upload)             skip_upload=1; shift ;;
       --no-restore-index)        restore_index=0; shift ;;
+      --drop-existing)           drop_existing=1; shift ;;
       --load)                    auto_load=1; shift ;;
       --show-cached)             version_only=1; shift ;;
       -h|--help)
@@ -84,8 +86,20 @@ cmd_restore_backup() {
     ok "upload complete"
   fi
 
+  # If --drop-existing, drop any collection in Milvus that's about to be
+  # restored. Without this, milvus-backup refuses with
+  # "collection already exist". Uses pymilvus when available; warns
+  # otherwise (and the restore will likely fail with the upstream error).
+  if (( drop_existing )); then
+    _restore_drop_existing
+  fi
+
+  # milvus-backup v0.5.x renamed --restore_index → --rebuild_index. Use
+  # the new flag name; the upstream binary on older versions still
+  # accepts --restore_index as a deprecated alias, but we should track
+  # the canonical name.
   local args=(restore -n "$name")
-  (( restore_index )) && args+=(--restore_index)
+  (( restore_index )) && args+=(--rebuild_index)
   [[ -n "$rename_pairs" ]] && args+=(--rename "$rename_pairs")
 
   info "==> restoring '$name' (this can take 30–60 min for ~100 GB)"
@@ -113,6 +127,34 @@ Verify with pymilvus:
   PY
 EOF
 }
+
+# Drop every collection that exists in the live cluster. Used by --drop-existing
+# so a restore can overwrite collections without milvus-backup refusing.
+# Uses pymilvus when available; warns otherwise.
+_restore_drop_existing() {
+  if ! command -v python3 >/dev/null 2>&1 || \
+     ! python3 -c 'import pymilvus' 2>/dev/null; then
+    warn "pymilvus not installed — cannot --drop-existing automatically"
+    info "install with: pip3 install --user --break-system-packages pymilvus"
+    info "or drop manually before retrying restore-backup"
+    return 0
+  fi
+
+  info "==> --drop-existing: clearing collections in the live cluster"
+  python3 - <<PY
+from pymilvus import MilvusClient
+c = MilvusClient(uri="http://127.0.0.1:${NGINX_LB_PORT}")
+cols = c.list_collections()
+if not cols:
+    print("  (no collections to drop)")
+else:
+    for col in cols:
+        print(f"  dropping {col}...")
+        c.drop_collection(col)
+    print(f"  dropped {len(cols)} collection(s)")
+PY
+}
+
 
 # Auto-load every collection that's currently NotLoaded, with replica_number
 # chosen based on cluster size. Uses pymilvus if available; falls back to
@@ -187,6 +229,13 @@ NAMING:
 INDEX:
   --no-restore-index             Skip index rebuild. Faster, but you must
                                  re-create indexes manually afterward.
+
+OVERWRITE:
+  --drop-existing                Drop every collection in the live cluster
+                                 before restore. Without this flag,
+                                 milvus-backup refuses with "collection
+                                 already exist" if a target collection is
+                                 already there. Requires pymilvus.
 
 POST-RESTORE:
   --load                         After restore, automatically load every

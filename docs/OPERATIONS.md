@@ -122,6 +122,72 @@ cd ~/milvus-onprem
 ./milvus-onprem restore-backup --from=~/dev_export
 ```
 
+### Useful flags for restore
+
+```bash
+# auto-load collections after restore (replica_number auto-derived from CLUSTER_SIZE):
+./milvus-onprem restore-backup --from=~/dev_export --load
+
+# overwrite existing collections (drops them first; requires pymilvus):
+./milvus-onprem restore-backup --from=~/dev_export --drop-existing --load
+
+# rename collections during restore (avoid clobbering live data):
+./milvus-onprem restore-backup --from=~/dev_export --rename=src_coll:imported_v1
+```
+
+### Backup in N-node HA clusters
+
+Backups work the **same way** on a 3/5/7-node HA cluster as they do
+in standalone:
+
+- **Run from any node.** The CLI talks to Milvus via the local LB
+  (`:19537`) and to MinIO via local `:9000`. Distributed MinIO means
+  any node's `:9000` serves the same content. Pick whichever node is
+  most convenient — they're symmetric.
+- **Backup data is itself redundant.** In distributed MinIO with N≥3
+  nodes, the backup tree gets erasure-coded across all peers. Losing
+  one node doesn't lose the backup. (Standalone single-drive MinIO
+  has zero redundancy on its data; off-site `export-backup` is
+  essential there.)
+- **`--load` yields immediate read redundancy.** The auto-derived
+  `replica_number` is `min(2, CLUSTER_SIZE)` — so on HA you get 2,
+  meaning the restored collection is loaded onto **two QueryNodes
+  on different nodes** the moment restore finishes. Either replica
+  can serve queries if the other is taken out.
+- **2.5 caveat: Pulsar singleton.** With Milvus 2.5, the message
+  queue is a singleton on `PULSAR_HOST`. If that node is down at
+  backup time, Milvus can't flush in-flight writes through it, so
+  the default backup (which flushes first) fails.
+
+  `milvus-onprem create-backup` handles this with a Pulsar
+  reachability pre-flight. If Pulsar is down, the command refuses to
+  start and tells you the two ways forward:
+
+  1. Fix Pulsar first (`docker start milvus-pulsar` on `PULSAR_HOST`).
+  2. Use `--strategy=skip_flush` to back up only what's already on
+     disk — fast, but very recent writes still in the Pulsar WAL
+     won't be included.
+
+  See [templates/2.5/README.md](../templates/2.5/README.md#spof-caveat-the-pulsar-singleton)
+  for the full SPOF discussion.
+
+  **2.6 (Woodpecker) has no such concern** — the WAL is embedded in
+  every Milvus instance, so any healthy node can flush.
+
+A typical backup cron in HA:
+
+```cron
+# every night at 3am, take a full milvus-backup snapshot.
+# distributed MinIO replicates it across nodes automatically.
+0 3 * * *  /home/operator/milvus-onprem/milvus-onprem create-backup \
+             --name=daily-$(date +\%F)
+
+# weekly off-site export to /backups (assume that's an NFS mount):
+0 4 * * 0  /home/operator/milvus-onprem/milvus-onprem export-backup \
+             --name=daily-$(date +\%F --date='yesterday') \
+             --to=/backups/milvus/weekly-$(date +\%F)
+```
+
 The wrapper handles everything: uploads to our MinIO, renders
 `backup.toml` from cluster.env, runs `milvus-backup restore --restore_index`.
 
