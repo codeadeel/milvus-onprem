@@ -1,0 +1,16 @@
+# =============================================================================
+# Python deps for test/smoke-test.py and the tutorial.
+#
+# pymilvus is pinned to 2.6.x to match the Milvus server (templates target
+# Milvus 2.6.x by default). Mismatched majors between client and server
+# will sometimes silently drop fields — keep them aligned.
+#
+# Install:
+#   pip3 install --user --break-system-packages -r test/requirements.txt
+# Or in a venv:
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r test/requirements.txt
+# =============================================================================
+
+pymilvus>=2.6,<2.7
+numpy>=1.24,<3
