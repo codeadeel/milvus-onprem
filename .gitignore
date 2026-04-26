@@ -1,0 +1,47 @@
+# =============================================================================
+# milvus-onprem — files that must never be committed
+# =============================================================================
+
+# macOS
+.DS_Store
+._*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local-only secrets / per-cluster config
+# cluster.env carries the MinIO secret + each cluster's peer IPs;
+# cluster.env.example is the committed annotated template.
+.env
+.env.*
+!.env.example
+cluster.env
+!cluster.env.example
+*.key
+*.pem
+credentials.json
+
+# Generated per-node configs from templates/. Render is deterministic from
+# cluster.env, so there's no value in versioning these.
+rendered/
+
+# Runtime data (etcd / minio / milvus). We keep /data/ off the repo path
+# in production, but ignore here as a belt-and-braces.
+/data/
+data/
+
+# Locally cached binaries (e.g. milvus-backup)
+.local/
+
+# Sentinel / state files written by lifecycle commands
+.peer-down-alert
+.bootstrap-complete
