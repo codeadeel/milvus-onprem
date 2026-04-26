@@ -1,0 +1,98 @@
+# =============================================================================
+# docker-compose.yml — generated for ${NODE_NAME} (Milvus ${MILVUS_VERSION})
+#
+# DO NOT EDIT BY HAND. Re-render with `milvus-onprem render` after changes
+# to cluster.env. Source: templates/${MILVUS_VERSION}/docker-compose.yml.tpl
+#
+# All services use host networking — simpler cross-node communication and
+# avoids docker-bridge port-forwarding overhead. Each container's data
+# lives under ${DATA_ROOT}/<component>/ on this host.
+# =============================================================================
+
+version: "3.8"
+
+services:
+
+  # --- etcd: ${CLUSTER_SIZE}-node Raft cluster ----------------------------
+  # Quorum-aware metadata store. Tolerates floor((${CLUSTER_SIZE}-1)/2)
+  # member failures simultaneously.
+  etcd:
+    image: quay.io/coreos/etcd:${ETCD_IMAGE_TAG}
+    container_name: milvus-etcd
+    network_mode: host
+    restart: always
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ${DATA_ROOT}/etcd:/etcd-data
+    command:
+      - etcd
+      - --name=${NODE_NAME}
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:${ETCD_CLIENT_PORT}
+      - --advertise-client-urls=http://${LOCAL_IP}:${ETCD_CLIENT_PORT}
+      - --listen-peer-urls=http://0.0.0.0:${ETCD_PEER_PORT}
+      - --initial-advertise-peer-urls=http://${LOCAL_IP}:${ETCD_PEER_PORT}
+      - --initial-cluster=${ETCD_INITIAL_CLUSTER}
+      - --initial-cluster-token=${CLUSTER_NAME}
+      - --initial-cluster-state=${ETCD_INITIAL_CLUSTER_STATE}
+
+  # --- MinIO: ${CLUSTER_SIZE}-node distributed cluster --------------------
+  # Erasure-coded across all peers. For ${CLUSTER_SIZE}>=4 nodes this gives
+  # automatic single-drive parity. For 3 nodes, the cluster runs but with
+  # tighter parity margins. For 1 node it runs as plain single-drive.
+  minio:
+    image: minio/minio:${MINIO_IMAGE_TAG}
+    container_name: milvus-minio
+    network_mode: host
+    restart: always
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+      - MINIO_REGION=${MINIO_REGION}
+    volumes:
+      - ${DATA_ROOT}/minio:/data
+    command: ${MINIO_SERVER_CMD}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${MINIO_API_PORT}/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --- Milvus: standalone-clustered with embedded Woodpecker WAL ----------
+  # Runs `milvus run standalone` — the all-in-one binary. With shared etcd
+  # and shared object storage, multiple instances form a clustered Milvus
+  # via etcd-based service discovery and leader election.
+  milvus:
+    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    container_name: milvus
+    network_mode: host
+    restart: always
+    command: ["milvus", "run", "standalone"]
+    volumes:
+      - ${DATA_ROOT}/milvus:/var/lib/milvus
+      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+    depends_on:
+      - etcd
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${MILVUS_HEALTHZ_PORT}/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --- nginx: LB across all ${CLUSTER_SIZE} Milvus instances on :${NGINX_LB_PORT}
+  # Layer 4 (TCP) load balancer with passive health checks. Clients connect
+  # to any node's :${NGINX_LB_PORT}; nginx routes to a healthy Milvus.
+  nginx:
+    image: nginx:${NGINX_IMAGE_TAG}
+    container_name: milvus-nginx
+    network_mode: host
+    restart: always
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - milvus

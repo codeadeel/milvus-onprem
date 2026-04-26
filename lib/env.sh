@@ -42,8 +42,10 @@ env_require() {
 # -----------------------------------------------------------------------------
 # Defaults — applied after sourcing cluster.env. The `:=` form means "leave
 # alone if already set," so user values in cluster.env always win.
+# `set -a` ensures the defaults are exported to envsubst subprocesses.
 # -----------------------------------------------------------------------------
 _env_apply_defaults() {
+  set -a
   : "${CLUSTER_NAME:=milvus-onprem}"
   : "${MINIO_ACCESS_KEY:=minioadmin}"
   : "${MINIO_REGION:=us-east-1}"
@@ -69,6 +71,7 @@ _env_apply_defaults() {
   : "${WATCHDOG_FAILURE_THRESHOLD:=6}"
 
   : "${PAIR_PORT:=19500}"
+  set +a
 }
 
 # -----------------------------------------------------------------------------

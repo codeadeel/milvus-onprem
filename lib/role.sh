@@ -33,6 +33,7 @@ role_detect() {
     NODE_INDEX="$FORCE_NODE_INDEX"
     LOCAL_IP="${PEERS_ARR[$((NODE_INDEX-1))]}"
     NODE_NAME="node-$NODE_INDEX"
+    export NODE_INDEX NODE_NAME LOCAL_IP CLUSTER_SIZE
     return 0
   fi
 
@@ -46,6 +47,7 @@ role_detect() {
       NODE_INDEX=$((i+1))
       LOCAL_IP="$ip"
       NODE_NAME="node-$NODE_INDEX"
+      export NODE_INDEX NODE_NAME LOCAL_IP CLUSTER_SIZE
       return 0
     fi
   done

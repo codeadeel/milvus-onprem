@@ -42,11 +42,15 @@ _render_var_list() {
   for v in CLUSTER_NAME NODE_NAME NODE_INDEX LOCAL_IP CLUSTER_SIZE \
            PEER_IPS DATA_ROOT MINIO_DRIVES_PER_NODE MQ_TYPE \
            MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_REGION \
+           MILVUS_VERSION \
            MILVUS_IMAGE_TAG ETCD_IMAGE_TAG MINIO_IMAGE_TAG NGINX_IMAGE_TAG \
            ETCD_CLIENT_PORT ETCD_PEER_PORT \
            MINIO_API_PORT MINIO_CONSOLE_PORT \
            MILVUS_PORT MILVUS_HEALTHZ_PORT NGINX_LB_PORT \
-           ETCD_INITIAL_CLUSTER MINIO_VOLUMES NGINX_UPSTREAM_BLOCK MILVUS_ETCD_ENDPOINTS; do
+           ETCD_INITIAL_CLUSTER ETCD_INITIAL_CLUSTER_STATE \
+           MINIO_VOLUMES MINIO_SERVER_CMD \
+           NGINX_UPSTREAM_BLOCK \
+           MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML; do
     printf '${%s} ' "$v"
   done
 }
@@ -72,19 +76,43 @@ _render_compute_derived() {
   done
   MILVUS_ETCD_ENDPOINTS="${MILVUS_ETCD_ENDPOINTS%,}"
 
-  # MinIO distributed mode volume spec: space-separated http URLs
-  # http://10.0.0.10:9000/data http://10.0.0.11:9000/data ...
-  MINIO_VOLUMES=""
+  # YAML list form for milvus.yaml — multi-line with leading indentation.
+  #     - 10.0.0.10:2379
+  #     - 10.0.0.11:2379
+  MILVUS_ETCD_ENDPOINTS_YAML=""
   for ((i=0; i<CLUSTER_SIZE; i++)); do
-    MINIO_VOLUMES+="http://${PEERS_ARR[$i]}:${MINIO_API_PORT}/data "
+    MILVUS_ETCD_ENDPOINTS_YAML+="    - ${PEERS_ARR[$i]}:${ETCD_CLIENT_PORT}"$'\n'
   done
-  MINIO_VOLUMES="${MINIO_VOLUMES% }"
+  MILVUS_ETCD_ENDPOINTS_YAML="${MILVUS_ETCD_ENDPOINTS_YAML%$'\n'}"
 
-  # nginx LB upstream block — newline-separated server lines.
+  # MinIO server command — differs for N=1 (single-drive) vs N>=3 (distributed).
+  if (( CLUSTER_SIZE == 1 )); then
+    MINIO_VOLUMES="/data"
+    MINIO_SERVER_CMD="server /data --address :${MINIO_API_PORT} --console-address :${MINIO_CONSOLE_PORT}"
+  else
+    MINIO_VOLUMES=""
+    for ((i=0; i<CLUSTER_SIZE; i++)); do
+      MINIO_VOLUMES+="http://${PEERS_ARR[$i]}:${MINIO_API_PORT}/data "
+    done
+    MINIO_VOLUMES="${MINIO_VOLUMES% }"
+    MINIO_SERVER_CMD="server ${MINIO_VOLUMES} --address :${MINIO_API_PORT} --console-address :${MINIO_CONSOLE_PORT}"
+  fi
+
+  # nginx LB upstream block — one server line per peer with passive health-check.
+  # max_fails=3 fail_timeout=30s marks a backend down after 3 failed
+  # requests within 30s; nginx routes around it until it recovers.
   NGINX_UPSTREAM_BLOCK=""
   for ((i=0; i<CLUSTER_SIZE; i++)); do
-    NGINX_UPSTREAM_BLOCK+="    server ${PEERS_ARR[$i]}:${MILVUS_PORT};"$'\n'
+    NGINX_UPSTREAM_BLOCK+="    server ${PEERS_ARR[$i]}:${MILVUS_PORT} max_fails=3 fail_timeout=30s;"$'\n'
   done
 
-  export ETCD_INITIAL_CLUSTER MINIO_VOLUMES NGINX_UPSTREAM_BLOCK MILVUS_ETCD_ENDPOINTS
+  # Default the etcd cluster state to "new" — `milvus-onprem rejoin` flips
+  # this to "existing" before re-rendering, so a recovering node joins
+  # rather than bootstrapping fresh.
+  : "${ETCD_INITIAL_CLUSTER_STATE:=new}"
+
+  export ETCD_INITIAL_CLUSTER ETCD_INITIAL_CLUSTER_STATE \
+         MINIO_VOLUMES MINIO_SERVER_CMD \
+         NGINX_UPSTREAM_BLOCK \
+         MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML
 }
