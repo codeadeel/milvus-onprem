@@ -4,6 +4,11 @@ Templates that render the per-node configuration files for a Milvus 2.6
 deployment. Selected automatically by `lib/render.sh` when
 `MILVUS_IMAGE_TAG` is `v2.6.*` (the major.minor is regex-extracted).
 
+> Runs on any Linux VM with Docker — cloud, on-prem, or bare metal.
+> No cloud APIs are called. See the top-level
+> [README's "Supported environments"](../../README.md#supported-environments)
+> for the full list.
+
 ## What this version's deploy looks like
 
 ```mermaid

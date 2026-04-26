@@ -20,6 +20,13 @@ For day-2 ops, see [OPERATIONS.md](OPERATIONS.md).
 - Each VM has a **stable internal IP** that you know in advance. Position
   in `PEER_IPS` determines node identity.
 
+VMs can be **anywhere** — AWS, GCP, Azure, on-prem (VMware / Proxmox /
+KVM), bare metal, hybrid, even local dev (VirtualBox / Multipass).
+The CLI is cloud-agnostic: no cloud APIs called, no cloud DNS, just
+direct IP-over-TCP between peers. See
+[the README's "Supported environments" section](../README.md#supported-environments)
+for the full list.
+
 ### Software on each VM
 
 - Linux (any distro)

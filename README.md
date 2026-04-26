@@ -84,8 +84,10 @@ For the full walkthrough with diagrams, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT
   rejected (no Raft quorum).
 - **Auto-failover for single-VM loss** — etcd Raft handles it, no
   operator intervention needed if you have proper quorum.
-- **Multi-version architecture** — currently ships Milvus 2.6.x; PRs
-  for 2.5.x are welcome (drop in `templates/2.5/`).
+- **Multi-version Milvus** — ships templates for 2.6.x (default,
+  Woodpecker WAL) and 2.5.x (Pulsar singleton). Switch by changing
+  `MILVUS_IMAGE_TAG` in cluster.env. Future versions = drop in
+  `templates/X.Y/`.
 - **Backup integration** — wraps the official `milvus-backup` CLI for
   create/restore. Designed around the "100GB-from-developer" import case.
 - **Per-port customisation** — every port (Milvus, MinIO, etcd, nginx,
@@ -97,8 +99,45 @@ For the full walkthrough with diagrams, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT
 - A Kubernetes alternative for general workloads. It does one thing:
   HA Milvus on plain VMs.
 - A managed service. You operate it.
-- For Milvus 1.x. We target 2.6+ (2.5 support possible via community
-  templates).
+- For Milvus 1.x. We target 2.5 and 2.6 today; future majors land as
+  templates.
+
+## Supported environments
+
+**milvus-onprem is cloud-agnostic.** It runs on any Linux VM with
+Docker, regardless of where that VM lives:
+
+- **Cloud:** AWS / GCP / Azure / OCI / DigitalOcean / Linode / Vultr / etc.
+- **On-prem:** VMware / Proxmox / KVM / Xen / OpenStack / Nutanix
+- **Bare metal:** any Linux server you can SSH into
+- **Hybrid:** any mix of the above, as long as nodes can reach each
+  other on the cluster ports
+- **Disconnected / air-gapped:** mirror the four container images into
+  your private registry; no internet access required at runtime
+- **Local dev:** VirtualBox / Multipass / lima / WSL2 / a fleet of
+  Raspberry Pis on your home lab
+
+**Requirements:**
+
+- Linux, kernel 4.x or newer (any distro — Debian, Ubuntu, RHEL,
+  Rocky, Alma, openSUSE, Arch, etc.)
+- Docker Engine ≥ 24.x with the Compose plugin
+- Network reachability between every peer on the cluster ports
+  (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#network-ports-between-nodes))
+- Image-pull access to `milvusdb/milvus`, `quay.io/coreos/etcd`,
+  `minio/minio`, `nginx`, `apachepulsar/pulsar` (or a private mirror
+  with these images for air-gapped environments)
+
+**Not required:**
+
+- Kubernetes
+- Cloud-provider APIs (no `gcloud` / `aws` / `az` calls anywhere)
+- Cloud-specific DNS / metadata services
+- A specific Linux distro
+- A specific architecture — works on `amd64` and `arm64`
+
+The CLI uses **direct IP addresses**, not cloud DNS. As long as your
+nodes can `nc -zv <peer-ip> 2379` each other, you're good.
 
 ## Documentation
 

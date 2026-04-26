@@ -4,6 +4,11 @@ Templates that render the per-node configuration files for a Milvus 2.5
 deployment. Selected automatically by `lib/render.sh` when
 `MILVUS_IMAGE_TAG` is `v2.5.*`.
 
+> Runs on any Linux VM with Docker — cloud, on-prem, or bare metal.
+> No cloud APIs are called. See the top-level
+> [README's "Supported environments"](../../README.md#supported-environments)
+> for the full list.
+
 > ⚠ **2.5 has a single point of failure for writes** — see
 > [SPOF caveat](#spof-caveat-the-pulsar-singleton) below. If you can,
 > use 2.6 instead (Woodpecker WAL eliminates the SPOF).
