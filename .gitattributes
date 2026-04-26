@@ -1,0 +1,11 @@
+# =============================================================================
+# GitHub Linguist overrides
+#
+# Our .tpl files are envsubst templates that contain YAML or nginx config.
+# Without these hints, Linguist classifies all `.tpl` files as Smarty
+# (a PHP templating engine), which is misleading on the repo's languages bar.
+# =============================================================================
+
+templates/**/docker-compose.yml.tpl   linguist-language=YAML
+templates/**/milvus.yaml.tpl          linguist-language=YAML
+templates/**/nginx.conf.tpl           linguist-language=Nginx
