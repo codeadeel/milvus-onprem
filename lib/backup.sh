@@ -66,46 +66,60 @@ backup_download_binary() {
 }
 
 
-# Render backup.toml from current cluster.env values. Points at this
+# Render backup.yaml from current cluster.env values. Points at this
 # node's local Milvus + MinIO endpoints (any node works since the cluster
 # is symmetric).
+#
+# YAML format is required by milvus-backup v0.5.x+ — earlier releases
+# (<= v0.5.4) used TOML and the same content lived in backup.toml.
+#
 # Prints the path to the rendered file on stdout.
 backup_render_config() {
-  local target="${REPO_ROOT}/.local/backup.toml"
+  local target="${REPO_ROOT}/.local/backup.yaml"
   mkdir -p "$(dirname "$target")"
   cat > "$target" <<EOF
 # milvus-backup config — auto-generated from cluster.env.
 # Re-rendered every time backup_render_config is called.
 
-[milvus]
-address              = "${LOCAL_IP}"
-port                 = ${MILVUS_PORT}
-authorizationEnabled = false
-tlsMode              = 0
-user                 = ""
-password             = ""
+log:
+  level: info
 
-[minio]
-storageType          = "minio"
-address              = "${LOCAL_IP}"
-port                 = ${MINIO_API_PORT}
-accessKeyID          = "${MINIO_ACCESS_KEY}"
-secretAccessKey      = "${MINIO_SECRET_KEY}"
-useSSL               = false
-useIAM               = false
-useVirtualHost       = false
-bucketName           = "milvus-bucket"
-rootPath             = "files"
+milvus:
+  address: ${LOCAL_IP}
+  port: ${MILVUS_PORT}
+  authorizationEnabled: false
+  tlsMode: 0
+  user: ""
+  password: ""
 
-# Backup destination — same MinIO, separate path.
-backupAccessKeyID     = "${MINIO_ACCESS_KEY}"
-backupSecretAccessKey = "${MINIO_SECRET_KEY}"
-backupBucketName      = "milvus-bucket"
-backupRootPath        = "backup"
+minio:
+  # MinIO speaks S3, so cloudProvider = "aws" (Milvus 2.6 dropped 'minio'
+  # as a valid value; aws works for any S3-compatible store).
+  cloudProvider: aws
+  storageType: minio
+  address: ${LOCAL_IP}
+  port: ${MINIO_API_PORT}
+  accessKeyID: ${MINIO_ACCESS_KEY}
+  secretAccessKey: ${MINIO_SECRET_KEY}
+  useSSL: false
+  useIAM: false
+  useVirtualHost: false
+  bucketName: milvus-bucket
+  rootPath: files
 
-[backup]
-maxSegmentGroupSize = "2G"
-parallelism         = 4
+  # Backup destination — same MinIO, separate path.
+  backupAccessKeyID: ${MINIO_ACCESS_KEY}
+  backupSecretAccessKey: ${MINIO_SECRET_KEY}
+  backupBucketName: milvus-bucket
+  backupRootPath: backup
+
+backup:
+  maxSegmentGroupSize: 2G
+  parallelism:
+    backupCollection: 4
+    copydata: 128
+    restoreCollection: 2
+  keepTempFiles: false
 EOF
   echo "$target"
 }
