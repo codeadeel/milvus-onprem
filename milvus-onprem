@@ -56,6 +56,9 @@ Usage: milvus-onprem <command> [options]
   ps               Show running milvus-* containers (filtered docker ps).
   logs             Tail logs for a component (etcd / minio / milvus / nginx / pulsar).
 
+  install          Drop the CLI on PATH + bash completion (system-wide).
+  uninstall        Reverse of install (does not touch data — see teardown).
+
   help             Show this message.
 
 For per-command help: milvus-onprem <command> --help
@@ -88,6 +91,8 @@ main() {
     urls)            cmd_urls            "$@" ;;
     ps)              cmd_ps              "$@" ;;
     logs)            cmd_logs            "$@" ;;
+    install)         cmd_install         "$@" ;;
+    uninstall)       cmd_uninstall       "$@" ;;
     -h|--help|help)  usage ;;
     *)               err "unknown command: $cmd"; usage; exit 1 ;;
   esac

@@ -74,6 +74,14 @@ cd ~/milvus-onprem
 That's a working 3-node Milvus cluster. Clients connect to any node's
 `:19537`.
 
+Optional — drop the CLI on PATH so you can call it from any directory:
+
+```bash
+./milvus-onprem install        # /usr/local/bin/milvus-onprem + bash completion
+# or, per-user without sudo:
+./milvus-onprem install --prefix=$HOME/.local/bin --completion-dir=$HOME/.bash_completion.d
+```
+
 For the full walkthrough with diagrams, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## What you get

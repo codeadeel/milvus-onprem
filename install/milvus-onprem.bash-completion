@@ -1,0 +1,62 @@
+# =============================================================================
+# milvus-onprem bash completion
+#
+# Installed by `milvus-onprem install` into /etc/bash_completion.d/.
+# Sourced automatically by bash on interactive shell start (on most distros).
+# =============================================================================
+
+_milvus_onprem_complete() {
+    local cur prev words cword
+    _init_completion 2>/dev/null || {
+        # Fallback if bash-completion helpers aren't installed.
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+    }
+
+    local subcommands="init render up down bootstrap status wait teardown \
+                       pair join \
+                       backup-etcd create-backup export-backup restore-backup \
+                       smoke version urls ps logs \
+                       install uninstall help"
+
+    # Position 1: complete subcommands
+    if (( COMP_CWORD == 1 )); then
+        COMPREPLY=( $(compgen -W "$subcommands" -- "$cur") )
+        return 0
+    fi
+
+    # Position 2+: per-subcommand arg completion
+    case "${COMP_WORDS[1]}" in
+        logs)
+            if (( COMP_CWORD == 2 )); then
+                COMPREPLY=( $(compgen -W "etcd minio milvus nginx pulsar" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "--tail= -f --follow --help" -- "$cur") )
+            fi
+            ;;
+        teardown)
+            COMPREPLY=( $(compgen -W "--full --force --help" -- "$cur") )
+            ;;
+        init)
+            COMPREPLY=( $(compgen -W "--peer-ips= --milvus-image-tag= --overwrite --help" -- "$cur") )
+            ;;
+        bootstrap|status|wait|up|down|render|smoke|version|urls|ps|backup-etcd|pair|join)
+            COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+            ;;
+        create-backup)
+            COMPREPLY=( $(compgen -W "--name= --strategy= --help" -- "$cur") )
+            ;;
+        export-backup)
+            COMPREPLY=( $(compgen -W "--name= --to= --help" -- "$cur") )
+            ;;
+        restore-backup)
+            COMPREPLY=( $(compgen -W "--from= --skip-upload --name= --rename= --no-restore-index --drop-existing --load --help" -- "$cur") )
+            ;;
+        install|uninstall)
+            COMPREPLY=( $(compgen -W "--prefix= --completion-dir= --help" -- "$cur") )
+            ;;
+    esac
+    return 0
+}
+
+complete -F _milvus_onprem_complete milvus-onprem
