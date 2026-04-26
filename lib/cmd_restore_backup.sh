@@ -20,6 +20,7 @@ cmd_restore_backup() {
   local skip_upload=0
   local restore_index=1
   local version_only=0
+  local auto_load=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,6 +34,7 @@ cmd_restore_backup() {
       --milvus-backup-version)   MILVUS_BACKUP_VERSION="$2"; export MILVUS_BACKUP_VERSION; shift 2 ;;
       --skip-upload)             skip_upload=1; shift ;;
       --no-restore-index)        restore_index=0; shift ;;
+      --load)                    auto_load=1; shift ;;
       --show-cached)             version_only=1; shift ;;
       -h|--help)
         _restore_backup_help
@@ -90,6 +92,14 @@ cmd_restore_backup() {
   backup_run "${args[@]}"
   ok "restore complete"
 
+  if (( auto_load )); then
+    _restore_auto_load
+  else
+    info ""
+    info "Note: collections are restored but NOT loaded into QueryNode RAM."
+    info "Pass --load to auto-load after restore, or call load_collection() yourself."
+  fi
+
   cat <<EOF
 
 Verify with pymilvus:
@@ -102,6 +112,52 @@ Verify with pymilvus:
       print(f"  {col}: {c.get_collection_stats(col)}")
   PY
 EOF
+}
+
+# Auto-load every collection that's currently NotLoaded, with replica_number
+# chosen based on cluster size. Uses pymilvus if available; falls back to
+# clear instructions if not.
+_restore_auto_load() {
+  if ! command -v python3 >/dev/null 2>&1 || \
+     ! python3 -c 'import pymilvus' 2>/dev/null; then
+    warn "pymilvus not installed — skipping --load"
+    info "to install: pip3 install --user --break-system-packages pymilvus"
+    info "to load manually after install:"
+    info "  python3 -c 'from pymilvus import MilvusClient; c=MilvusClient(uri=\"http://127.0.0.1:${NGINX_LB_PORT}\")'"
+    info "                              .'.load_collection(\"<NAME>\", replica_number=1)'"
+    return 0
+  fi
+
+  local replicas=1
+  (( CLUSTER_SIZE >= 3 )) && replicas=2
+
+  info "==> loading restored collections (replica_number=$replicas)"
+  python3 - <<PY
+import sys, time
+from pymilvus import MilvusClient
+
+URI = "http://127.0.0.1:${NGINX_LB_PORT}"
+REPLICAS = ${replicas}
+
+c = MilvusClient(uri=URI)
+cols = c.list_collections()
+if not cols:
+    print("  (no collections — nothing to load)")
+    sys.exit(0)
+
+for col in cols:
+    state = c.get_load_state(col).get("state")
+    if str(state) == "Loaded" or (hasattr(state, 'name') and state.name == 'Loaded'):
+        print(f"  {col}: already loaded — skipping")
+        continue
+    print(f"  loading {col} (replica_number={REPLICAS})...", flush=True)
+    t0 = time.time()
+    c.load_collection(col, replica_number=REPLICAS)
+    print(f"    done in {time.time()-t0:.1f}s — {c.get_load_state(col)}")
+
+print(f"  loaded {len(cols)} collection(s); ready to query")
+PY
+  ok "auto-load complete"
 }
 
 _restore_backup_help() {
@@ -131,6 +187,15 @@ NAMING:
 INDEX:
   --no-restore-index             Skip index rebuild. Faster, but you must
                                  re-create indexes manually afterward.
+
+POST-RESTORE:
+  --load                         After restore, automatically load every
+                                 collection into QueryNode RAM with
+                                 replica_number=min(2, CLUSTER_SIZE).
+                                 Without this flag, collections come back
+                                 in NotLoad state and you must call
+                                 load_collection() yourself before queries
+                                 work. Requires pymilvus on the host.
 
 UPSTREAM BINARY:
   --milvus-backup-version=vX.Y.Z Override the upstream milvus-backup

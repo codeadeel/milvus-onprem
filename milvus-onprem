@@ -48,7 +48,10 @@ Usage: milvus-onprem <command> [options]
   backup-etcd      Snapshot the local etcd store to a .db file.
   create-backup    Take a milvus-backup snapshot of the live data (stored in MinIO).
   export-backup    Copy a backup from MinIO to a filesystem dir (USB / NFS / off-site).
-  restore-backup   Import a milvus-backup snapshot (the 100GB-from-elsewhere case).
+  restore-backup   Import a milvus-backup snapshot (use --load to make queryable).
+
+  smoke            Run the end-to-end smoke test (replica_number auto-derived).
+  version          Show CLI + configured-cluster version info.
 
   help             Show this message.
 
@@ -77,6 +80,8 @@ main() {
     create-backup)   cmd_create_backup   "$@" ;;
     export-backup)   cmd_export_backup   "$@" ;;
     restore-backup)  cmd_restore_backup  "$@" ;;
+    smoke)           cmd_smoke           "$@" ;;
+    version)         cmd_version         "$@" ;;
     -h|--help|help)  usage ;;
     *)               err "unknown command: $cmd"; usage; exit 1 ;;
   esac

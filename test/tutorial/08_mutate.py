@@ -4,6 +4,10 @@ Step 8 — upsert and delete.
 upsert is delete+insert keyed on the primary key.
 delete is a tombstone, applied at read time and physically compacted
 in the background.
+
+Note: pymilvus reads default to "Bounded" consistency, which can show
+slightly stale data right after a write. We pass consistency_level="Strong"
+on reads we expect to reflect the most recent mutation.
 """
 import time
 import numpy as np
@@ -21,11 +25,11 @@ client.upsert(collection_name=COLL, data=[{
     "id": 0, "category": "memo", "year": 2026,
     "score": 0.999, "embedding": v.tolist(),
 }])
-print(f"  after upsert: {client.query(COLL, filter='id == 0', output_fields=['id', 'category', 'year'])}")
+print(f"  after upsert: {client.query(COLL, filter='id == 0', output_fields=['id', 'category', 'year'], consistency_level='Strong')}")
 
 # delete every exhibit
-before = len(client.query(COLL, filter='category == \"exhibit\"', output_fields=["id"]))
+before = len(client.query(COLL, filter='category == \"exhibit\"', output_fields=["id"], consistency_level='Strong'))
 client.delete(collection_name=COLL, filter='category == "exhibit"')
 time.sleep(2)  # tombstones take a beat to propagate
-after = len(client.query(COLL, filter='category == \"exhibit\"', output_fields=["id"]))
+after = len(client.query(COLL, filter='category == \"exhibit\"', output_fields=["id"], consistency_level='Strong'))
 print(f"  exhibit rows: before={before}, after delete={after}")
