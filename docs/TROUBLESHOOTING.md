@@ -479,26 +479,37 @@ The dead peer should show `[FAIL]` in `peer reachability` and
 `unhealthy` / `connection refused` in the etcd cluster check. Make
 sure the surviving peers report healthy themselves.
 
-#### Step 2 — remove the dead member from etcd
+#### Step 2 — remove the dead member from etcd, then re-add a fresh entry
+
+The dead node has to be unregistered from etcd's Raft membership
+before the replacement can join. Then a fresh entry must be
+registered for the replacement *before* it starts up — otherwise the
+existing cluster will reject the new etcd as an unknown peer.
 
 ```bash
 # from any healthy peer:
 docker exec milvus-etcd etcdctl --endpoints=http://127.0.0.1:2379 \
   member list
 
-# find the row for the dead node (matches its --peer-urls), copy
-# the member-id (first column), and:
+# find the row for the dead node (matches its --peer-urls). The first
+# column is the member-id. Then:
 docker exec milvus-etcd etcdctl --endpoints=http://127.0.0.1:2379 \
   member remove <member-id-hex>
+
+# Register the replacement (use the same name and the IP it'll come up on):
+docker exec milvus-etcd etcdctl --endpoints=http://127.0.0.1:2379 \
+  member add <node-name> --peer-urls=http://<replacement-ip>:2380
 ```
 
-`member list` will now show only the surviving peers. Quorum is now
-`ceil((N-1)/2)`; the cluster keeps serving reads/writes.
+After `member remove`, the surviving peers operate as an N-1 cluster
+with `ceil((N-1)/2)` quorum, still serving reads/writes. After
+`member add`, `member list` shows the replacement as `unstarted`.
+Quorum is back to `ceil(N/2)` once it's started.
 
-#### Step 3 — bring up the replacement node
+#### Step 3 — bring up the replacement node with `--existing`
 
-You have two options depending on whether the new VM gets the *same*
-IP as the dead one or a different one.
+You have two options depending on whether the replacement VM gets the
+*same* IP as the dead one or a different one.
 
 **Option A: same IP (reimaged or rebooted-with-fresh-disk):**
 
@@ -506,54 +517,42 @@ On the replacement VM, repo cloned, no `cluster.env` yet:
 
 ```bash
 cd ~/milvus-onprem
-# fetch cluster.env from any healthy peer using a fresh pair token:
-#   on a healthy peer:    ./milvus-onprem pair       (new token)
-#   on the replacement:   ./milvus-onprem join <healthy-ip>:19500 <token>
+# on a healthy peer (e.g. m1):
+./milvus-onprem pair        # prints a token; will exit after fetches
+                            # OR after 10 min idle. Since only ONE
+                            # peer is fetching this time, expect the
+                            # pair-server to time out — that's OK.
+
+# on the replacement:
+./milvus-onprem join <healthy-ip>:19500 <token> --existing
 ```
 
-`join` runs `host_prep` and then bootstraps. Because the etcd member
-was already removed in Step 2, the new node's etcd will join as a
-fresh member of the existing cluster.
+The `--existing` flag is critical — it sets
+`ETCD_INITIAL_CLUSTER_STATE=existing` so the replacement's etcd joins
+the running Raft cluster (using the member entry registered in
+Step 2) instead of trying to bootstrap a new one. Without
+`--existing`, the new etcd refuses to start because m1+m2's etcds are
+already past the bootstrap phase.
 
 **Option B: new IP (different VM, same slot in `PEER_IPS`):**
 
 Edit `cluster.env` on every healthy peer to replace the dead IP with
 the new one (the slot — node-1, node-2, etc. — must stay the same).
-Re-render and recreate containers so milvus.yaml's etcd endpoints
-list and nginx upstreams pick up the new IP:
+Re-render and reload nginx:
 
 ```bash
 # on each healthy peer:
 cd ~/milvus-onprem
 sed -i 's/<dead-ip>/<new-ip>/' cluster.env
 ./milvus-onprem render
-docker compose -f rendered/<node-name>/docker-compose.yml up -d --force-recreate milvus-nginx
-# (other containers re-read milvus.yaml on next normal restart)
+docker exec milvus-nginx nginx -s reload
 ```
 
-Then on the replacement VM, follow Option A's `pair`/`join`
-instructions (the fetched cluster.env will already have the new IP).
+Then on the replacement VM, follow Option A — the fetched cluster.env
+will already have the new IP. The `etcdctl member add` from Step 2
+should also use `<new-ip>` rather than the dead one.
 
-#### Step 4 — re-add the etcd member
-
-Once etcd is up on the replacement node and listening on `:2380`:
-
-```bash
-# on a healthy peer:
-docker exec milvus-etcd etcdctl --endpoints=http://127.0.0.1:2379 \
-  member add <node-name> --peer-urls=http://<new-ip>:2380
-```
-
-Note: `bootstrap` already runs `etcd` with
-`ETCD_INITIAL_CLUSTER_STATE=new` because that's what the rendered
-docker-compose says. For a node joining an *existing* cluster, the
-state should be `existing` and `--initial-cluster` should list all
-peers. Today we work around this by removing+re-adding rather than
-hot-joining: the new etcd's data dir is empty, so it learns the
-state from peers via Raft snapshot. Future scale-out work
-(`add-node`) will template this properly.
-
-#### Step 5 — verify
+#### Step 4 — verify
 
 ```bash
 # from any peer:
