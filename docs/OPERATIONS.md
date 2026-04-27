@@ -281,11 +281,18 @@ docker logs --tail 200 milvus
 docker logs --tail 200 milvus-nginx
 ```
 
-Watchdog (when running as a systemd service — planned):
+Watchdog (running as a systemd service after
+`milvus-onprem install --with-watchdog`):
 
 ```bash
+sudo journalctl -u milvus-watchdog -f | grep PEER_
 sudo journalctl -u milvus-watchdog --since "10 minutes ago"
 ```
+
+Alert format is `PEER_DOWN_ALERT` / `PEER_UP_ALERT` followed by
+space-separated `key=value` pairs (`ts`, `node`, `ip`, `mode`,
+`consecutive_failures`, plus `was_down_for_s` on recovery) — easy to
+grep, easy to feed into a log shipper or alerting rule.
 
 For deeper Milvus debugging, edit `templates/<version>/milvus.yaml.tpl`
 and set `log.level: debug`, then `render && up`. Be prepared for a lot

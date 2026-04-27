@@ -166,7 +166,7 @@ Some changes need extra steps:
 | `MILVUS_IMAGE_TAG` (cross-major) | Plan a migration. Cross-major upgrades require milvus-backup → drop → restore. See [OPERATIONS.md](OPERATIONS.md). |
 | `MILVUS_IMAGE_TAG` (same major.minor patch) | Just `render && up`; safe. |
 | `PEER_IPS` | Tear down + redeploy. Re-numbering existing nodes mid-life is unsupported. |
-| `WATCHDOG_*` | `sudo systemctl restart milvus-watchdog` (when watchdog is wired to systemd; planned for v0.x). |
+| `WATCHDOG_*` | `sudo systemctl restart milvus-watchdog` (after `milvus-onprem install --with-watchdog`). |
 
 ---
 

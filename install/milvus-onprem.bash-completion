@@ -16,7 +16,7 @@ _milvus_onprem_complete() {
     local subcommands="init render up down bootstrap status wait teardown \
                        pair join \
                        backup-etcd create-backup export-backup restore-backup \
-                       smoke version urls ps logs \
+                       smoke version urls ps logs watchdog \
                        install uninstall help"
 
     # Position 1: complete subcommands
@@ -40,7 +40,7 @@ _milvus_onprem_complete() {
         init)
             COMPREPLY=( $(compgen -W "--peer-ips= --milvus-image-tag= --overwrite --help" -- "$cur") )
             ;;
-        bootstrap|status|wait|up|down|render|smoke|version|urls|ps|backup-etcd|pair|join)
+        bootstrap|status|wait|up|down|render|smoke|version|urls|ps|backup-etcd|pair|join|watchdog)
             COMPREPLY=( $(compgen -W "--help" -- "$cur") )
             ;;
         create-backup)
@@ -53,7 +53,7 @@ _milvus_onprem_complete() {
             COMPREPLY=( $(compgen -W "--from= --skip-upload --name= --rename= --no-restore-index --drop-existing --load --help" -- "$cur") )
             ;;
         install|uninstall)
-            COMPREPLY=( $(compgen -W "--prefix= --completion-dir= --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--prefix= --completion-dir= --with-watchdog --help" -- "$cur") )
             ;;
     esac
     return 0

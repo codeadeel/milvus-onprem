@@ -21,10 +21,13 @@ _CMD_INSTALL_SH_LOADED=1
 : "${INSTALL_PREFIX:=/usr/local/bin}"
 : "${COMPLETION_DIR:=/etc/bash_completion.d}"
 : "${CLI_NAME:=milvus-onprem}"
+: "${SYSTEMD_UNIT_DIR:=/etc/systemd/system}"
+: "${WATCHDOG_UNIT_NAME:=milvus-watchdog.service}"
 
 cmd_install() {
   local prefix="$INSTALL_PREFIX"
   local comp_dir="$COMPLETION_DIR"
+  local with_watchdog=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -32,11 +35,14 @@ cmd_install() {
       --prefix)           prefix="$2"; shift 2 ;;
       --completion-dir=*) comp_dir="${1#*=}"; shift ;;
       --completion-dir)   comp_dir="$2"; shift 2 ;;
+      --with-watchdog)    with_watchdog=1; shift ;;
       -h|--help)
         cat <<EOF
-Usage: milvus-onprem install [--prefix=DIR] [--completion-dir=DIR]
+Usage: milvus-onprem install [--prefix=DIR] [--completion-dir=DIR] [--with-watchdog]
 
 Drop a wrapper for this repo's CLI on PATH, plus bash completion.
+With --with-watchdog, also install and enable the milvus-watchdog
+systemd unit (alerts on peer-down via journald).
 
 After install you can run \`milvus-onprem <cmd>\` from any directory; the
 wrapper just execs the script in this repo, so \`git pull\` here updates
@@ -45,15 +51,19 @@ the system-wide CLI too.
 Defaults:
   --prefix=$INSTALL_PREFIX
   --completion-dir=$COMPLETION_DIR
+  systemd unit dir = $SYSTEMD_UNIT_DIR (with --with-watchdog)
 
 Examples:
   # System-wide (will sudo if needed):
   milvus-onprem install
 
+  # System-wide + alert-mode watchdog:
+  milvus-onprem install --with-watchdog
+
   # Per-user, no sudo:
   milvus-onprem install --prefix=\$HOME/.local/bin --completion-dir=\$HOME/.bash_completion.d
 
-To remove: milvus-onprem uninstall
+To remove: milvus-onprem uninstall [--with-watchdog]
 EOF
         return 0
         ;;
@@ -92,17 +102,25 @@ EOF
   fi
   $sudo_comp install -m 0644 "$completion_src" "$completion_dst"
 
+  if (( with_watchdog )); then
+    _install_watchdog_unit
+  fi
+
   ok "install complete"
   info ""
   info "next:"
   info "  - open a new shell (or \`source $completion_dst\`) to pick up completion"
   info "  - run \`$CLI_NAME help\` from anywhere"
+  if (( with_watchdog )); then
+    info "  - watchdog: \`journalctl -u $WATCHDOG_UNIT_NAME -f | grep PEER_\`"
+  fi
   info "  - to remove: \`$CLI_NAME uninstall\`"
 }
 
 cmd_uninstall() {
   local prefix="$INSTALL_PREFIX"
   local comp_dir="$COMPLETION_DIR"
+  local with_watchdog=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -110,13 +128,15 @@ cmd_uninstall() {
       --prefix)           prefix="$2"; shift 2 ;;
       --completion-dir=*) comp_dir="${1#*=}"; shift ;;
       --completion-dir)   comp_dir="$2"; shift 2 ;;
+      --with-watchdog)    with_watchdog=1; shift ;;
       -h|--help)
         cat <<EOF
-Usage: milvus-onprem uninstall [--prefix=DIR] [--completion-dir=DIR]
+Usage: milvus-onprem uninstall [--prefix=DIR] [--completion-dir=DIR] [--with-watchdog]
 
 Remove the system-wide wrapper and bash completion installed by
-\`milvus-onprem install\`. Doesn't touch the working tree, containers,
-or data — for that, see \`teardown --full\`.
+\`milvus-onprem install\`. With --with-watchdog, also disable and remove
+the milvus-watchdog systemd unit. Doesn't touch the working tree,
+containers, or data — for that, see \`teardown --full\`.
 EOF
         return 0
         ;;
@@ -126,6 +146,10 @@ EOF
 
   local wrapper_dst="$prefix/$CLI_NAME"
   local completion_dst="$comp_dir/$CLI_NAME"
+
+  if (( with_watchdog )); then
+    _uninstall_watchdog_unit
+  fi
 
   if [[ -e "$wrapper_dst" ]]; then
     local s; s="$(_install_sudo_if_needed "$wrapper_dst")"

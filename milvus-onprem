@@ -23,11 +23,16 @@ source "$REPO_ROOT/lib/etcd.sh"
 source "$REPO_ROOT/lib/minio.sh"
 source "$REPO_ROOT/lib/host.sh"
 source "$REPO_ROOT/lib/backup.sh"
+source "$REPO_ROOT/lib/watchdog.sh"
 
 # Source every cmd_*.sh — each contributes a single command.
 for f in "$REPO_ROOT"/lib/cmd_*.sh; do
   [[ -f "$f" ]] && source "$f"
 done
+
+# install_watchdog uses cmd_install.sh's WATCHDOG_UNIT_NAME / SYSTEMD_UNIT_DIR
+# and _install_sudo_if_needed, so source it after the cmd_*.sh sweep.
+source "$REPO_ROOT/lib/install_watchdog.sh"
 
 usage() {
   cat <<EOF
@@ -57,7 +62,9 @@ Usage: milvus-onprem <command> [options]
   logs             Tail logs for a component (etcd / minio / milvus / nginx / pulsar).
 
   install          Drop the CLI on PATH + bash completion (system-wide).
+                   Pass --with-watchdog to also install the alert-mode systemd unit.
   uninstall        Reverse of install (does not touch data — see teardown).
+  watchdog         Long-running peer-down poller (used by milvus-watchdog.service).
 
   help             Show this message.
 
@@ -93,6 +100,7 @@ main() {
     logs)            cmd_logs            "$@" ;;
     install)         cmd_install         "$@" ;;
     uninstall)       cmd_uninstall       "$@" ;;
+    watchdog)        cmd_watchdog        "$@" ;;
     -h|--help|help)  usage ;;
     *)               err "unknown command: $cmd"; usage; exit 1 ;;
   esac
