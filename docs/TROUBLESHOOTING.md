@@ -15,6 +15,31 @@ For day-2 operational tasks, see [OPERATIONS.md](OPERATIONS.md).
 
 ## Init / pair / join issues
 
+### `init`: `Milvus 2.5 + multi-node ... is not supported in this build`
+
+Milvus 2.5 in `milvus run standalone` mode panics on coord election
+when multiple instances share an etcd:
+
+```
+panic: function CompareAndSwap error for compare is false for key: rootcoord
+```
+
+Every node racing for `rootcoord` registration loses N-1 elections,
+each loss panics the process, the container restarts, and the cycle
+never converges. This is an upstream Milvus 2.5 limitation — 2.6 made
+coord election graceful (waits for election to settle), 2.5 was
+designed for either a true single-process standalone OR a full
+coord-mode cluster (separate `rootcoord`/`datacoord`/`querycoord`/
+proxy/worker components), not the "monolith × N" pattern this tool
+deploys.
+
+We refuse the combination at `init` (and again at any later `env_require`)
+so operators get the actionable error up front instead of staring at a
+2-Hz panic-loop in `docker logs milvus`.
+
+Use Milvus 2.6 for HA (`--milvus-image-tag=v2.6.x`), or stick to a
+single-node 2.5 deploy (`--peer-ips=<single-ip>`).
+
 ### `init`: `--peer-ips is required`
 
 You ran `init` with no flags. Pass at least `--peer-ips`:
