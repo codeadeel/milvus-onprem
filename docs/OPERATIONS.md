@@ -241,6 +241,52 @@ For now, scale-out requires a planned migration:
 Estimated time: hours to a day, depending on data size. Not great —
 the scale-out story is the next big v0.x priority.
 
+### Design notes for the eventual `add-node` command
+
+Captured here so a future session can pick up without re-deriving:
+
+**etcd path** (the easy part): `etcdctl member add node-N
+--peer-urls=http://NEW_IP:2380` from any healthy peer registers the
+new member. The new node then starts etcd with
+`ETCD_INITIAL_CLUSTER_STATE=existing` and an `--initial-cluster` list
+that *includes itself*. Existing nodes don't restart (their etcd has
+its data dir; `--initial-cluster-state=new` is ignored on subsequent
+boots).
+
+**MinIO path** (the hard part): distributed MinIO takes its server
+list at startup and **does not support online member addition to the
+same pool**. To grow a 3-node cluster to 4, every existing MinIO has
+to restart with the 4-server `MINIO_SERVER_CMD`. Two viable options:
+
+- *Rolling restart*: stop/start MinIO on each node sequentially (one
+  at a time, wait for healthcheck, move to next). Erasure coding
+  tolerates one drive missing, so reads/writes degrade but don't
+  fail. Implementable as a `cmd_add_node.sh` step.
+- *Server-pool expansion*: `mc admin pool add` adds the new node as
+  a *separate* pool. New writes go to the new pool until it equalises;
+  existing data stays on the original pool. Different operational
+  shape — usually not what users mean by "add a node".
+
+**Cluster.env propagation**: every existing peer's `cluster.env`
+needs `PEER_IPS` extended with the new IP. Re-render is required so
+the milvus.yaml `etcd.endpoints` block picks up the new peer. nginx
+LB upstream list also needs the new node. Existing milvus / nginx
+containers need a restart for the rendered changes to take effect
+(milvus picks up etcd endpoints on start; nginx re-reads its config
+on `up -d --force-recreate nginx`).
+
+**New-node bootstrap**: needs a variant of `pair`/`join` that flips
+`ETCD_INITIAL_CLUSTER_STATE=existing` and skips the initial-bootstrap
+self-checks. Cheapest path: extend `cmd_pair.sh` with `--add-node`
+that emits the joiner's required env, plus `cmd_join.sh` accepting
+`--existing` to set the state.
+
+**Why this is deferred**: each of the four parts is small in isolation,
+but the orchestration is hairy and the failure modes are global
+(half-added node = split-brain etcd, MinIO refusing reads). It needs a
+4th VM in CI to validate end-to-end before shipping. Punted to a
+focused session per CLAUDE.md guidance.
+
 ---
 
 ## Upgrading
