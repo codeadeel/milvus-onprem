@@ -72,12 +72,17 @@ ${PULSAR_SERVICE_BLOCK}
   # Run on every node; only one is the active leader at any time, the
   # others stand by. This is the path 2.5 was designed for, and the one
   # `milvus run standalone` deliberately does not provide.
+  #
+  # NOTE: Milvus 2.5.x's CLI calls this server type `mixture` even though
+  # the docs use the name "mixcoord". The container is still named
+  # `milvus-mixcoord` so operators see the role-meaningful name in
+  # `milvus-onprem ps` / logs.
   mixcoord:
     image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
     container_name: milvus-mixcoord
     network_mode: host
     restart: always
-    command: ["milvus", "run", "mixcoord"]
+    command: ["milvus", "run", "mixture"]
     volumes:
       - ${DATA_ROOT}/milvus:/var/lib/milvus
       - ./milvus.yaml:/milvus/configs/user.yaml:ro
