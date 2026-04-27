@@ -30,6 +30,13 @@ cmd_bootstrap() {
 
   info "==> bootstrap on $NODE_NAME (cluster=$CLUSTER_NAME, size=$CLUSTER_SIZE)"
 
+  # Re-prep host dirs. After `teardown --data` (or `--full`) wipes
+  # /data/{etcd,minio,milvus,pulsar}, docker bind-mounts re-create the
+  # paths as root:root on next container start, which makes the
+  # UID-1000 etcd/minio and UID-10000 pulsar containers crash with
+  # AccessDenied. host_prep is idempotent — safe on a clean cluster too.
+  host_prep "$DATA_ROOT"
+
   # --- Stage 1: render --------------------------------------------------
   info "==> Stage 1/7: render templates"
   render_all
