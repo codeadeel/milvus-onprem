@@ -16,6 +16,37 @@ def banner(title: str) -> None:
     print(f"\n{'=' * 60}\n  {title}\n{'=' * 60}")
 
 
+def retry_on_recovering(fn, *, max_wait_s=120, base_delay_s=1.0, max_delay_s=10.0):
+    """
+    Call fn() and retry while Milvus reports a transient recovery error.
+
+    During a node failover or restart the cluster briefly returns errors
+    like 'collection on recovering' or 'no available rootcoord' while
+    coordinators / querynodes reassign channels. Bare reads will fail
+    once and then succeed if you retry — this helper hides the loop.
+
+    Re-raises the original exception if max_wait_s elapses, or
+    immediately if the exception is not a known recovery-class error
+    (so real bugs surface instead of getting silently swallowed).
+    """
+    import time
+    from pymilvus.exceptions import MilvusException
+
+    transient = ("recovering", "no available", "channel not available",
+                 "channel checker not ready")
+    deadline = time.monotonic() + max_wait_s
+    delay = base_delay_s
+    while True:
+        try:
+            return fn()
+        except MilvusException as e:
+            if not any(p in str(e).lower() for p in transient) \
+               or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(delay, max_delay_s))
+            delay = min(delay * 2, max_delay_s)
+
+
 def all_peer_uris():
     """
     Read PEER_IPS from cluster.env and return (name, gRPC-uri) pairs for

@@ -66,3 +66,19 @@ script edits needed.
 
 If `cluster.env` is missing (e.g. running this tutorial against a
 different cluster), step 5 falls back to a single localhost peer.
+
+## Reads during a node restart or failover
+
+While a node is recovering, in-flight reads can briefly fail with
+`code=106 collection on recovering` (or similar) until the cluster
+finishes reassigning channels. SDK callers should retry with backoff —
+the `retry_on_recovering(fn)` helper in `_shared.py` is a thin wrapper
+that does exactly that:
+
+```python
+from _shared import retry_on_recovering
+hits = retry_on_recovering(lambda: client.search(...))
+```
+
+It only retries known recovery-class messages and re-raises everything
+else, so real bugs still surface immediately.
