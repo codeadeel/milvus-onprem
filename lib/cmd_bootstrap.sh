@@ -45,12 +45,18 @@ cmd_bootstrap() {
   dc up -d minio
 
   # In distributed mode, MinIO needs all peers reachable to form a cluster.
-  # In standalone mode, it's healthy immediately.
+  # In standalone mode, it's healthy immediately. Both waits below are
+  # `|| warn`-guarded: under multi-node `pair`/`join` the peer-side
+  # bootstrap reaches Stage 3 before the bootstrap-node's own MinIO is
+  # up, so a missed deadline is normal — bootstrap is idempotent and
+  # downstream stages catch up on the next run.
   if role_is_standalone; then
-    _wait_for "local MinIO" 60 minio_local_healthy
+    _wait_for "local MinIO" 60 minio_local_healthy \
+      || warn "local MinIO not healthy yet — re-run bootstrap once it is"
   else
     info "  distributed MinIO — waiting for all peers to reach :${MINIO_API_PORT}"
-    _wait_peers_minio_reachable 120
+    _wait_peers_minio_reachable 120 \
+      || warn "not all peers reachable on :${MINIO_API_PORT} yet — proceeding; re-run bootstrap once they are"
     _wait_for "MinIO cluster health" 120 minio_cluster_healthy \
       || warn "MinIO cluster not yet healthy — may need more peers up"
   fi

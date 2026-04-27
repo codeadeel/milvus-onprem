@@ -101,6 +101,25 @@ Distributed MinIO needs **all peers** to be reachable on `:9000`
 before it forms quorum. If you've only bootstrapped some nodes,
 this warning is expected — re-run `bootstrap` after every peer is up.
 
+### `join`: returns with only etcd + minio running, no milvus / nginx
+
+Symptom on a peer right after `./milvus-onprem join`: the shell returns
+to a prompt, `docker ps -a` shows only `milvus-etcd` and `milvus-minio`,
+no `milvus` or `milvus-nginx` containers were ever created, and
+`docker images` shows no `milvusdb/milvus` pull was attempted.
+
+Root cause: in the `pair`/`join` flow the peer hits Stage 3 (distributed
+MinIO peer-reach wait) before the bootstrap node has run its own
+`bootstrap`. The wait times out, and an unguarded `_wait_peers_minio_reachable`
+under `set -e` used to abort the bootstrap before Stage 4. Both Stage 3
+waits are now `|| warn`-guarded so peers proceed to start Milvus and
+nginx even when the mesh isn't fully formed yet.
+
+Recovery on a deployed cluster: re-run `./milvus-onprem bootstrap` on
+the affected peer once the bootstrap node's MinIO is up. Bootstrap is
+idempotent and will pull the missing images, create the missing
+containers, and converge.
+
 ### `bootstrap` Stage 2: `local etcd not healthy`
 
 etcd needs quorum to report healthy. With only one node up in a 3-node
