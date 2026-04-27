@@ -77,12 +77,27 @@ ${PULSAR_SERVICE_BLOCK}
   # the docs use the name "mixcoord". The container is still named
   # `milvus-mixcoord` so operators see the role-meaningful name in
   # `milvus-onprem ps` / logs.
+  #
+  # The `-rootcoord/-datacoord/-querycoord/-indexcoord=true` flags must
+  # be passed explicitly even though `milvus run mixture --help` claims
+  # they default to true. Without them, 2.5.4's mixture process starts
+  # but never opens the coord gRPC ports (53100/13333/19531/31000), so
+  # proxy hangs in init with `find no available rootcoord`. Tested on
+  # real hardware: blank `mixture` → no coord ports bound; with the
+  # explicit flags → all four bind and proxy converges.
   mixcoord:
     image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
     container_name: milvus-mixcoord
     network_mode: host
     restart: always
-    command: ["milvus", "run", "mixture"]
+    command:
+      - milvus
+      - run
+      - mixture
+      - -rootcoord=true
+      - -datacoord=true
+      - -querycoord=true
+      - -indexcoord=true
     volumes:
       - ${DATA_ROOT}/milvus:/var/lib/milvus
       - ./milvus.yaml:/milvus/configs/user.yaml:ro
