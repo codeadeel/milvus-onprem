@@ -284,8 +284,8 @@ that emits the joiner's required env, plus `cmd_join.sh` accepting
 **Why this is deferred**: each of the four parts is small in isolation,
 but the orchestration is hairy and the failure modes are global
 (half-added node = split-brain etcd, MinIO refusing reads). It needs a
-4th VM in CI to validate end-to-end before shipping. Punted to a
-focused session per CLAUDE.md guidance.
+4th VM in CI to validate end-to-end before shipping. Revisit when one
+is available.
 
 ---
 
