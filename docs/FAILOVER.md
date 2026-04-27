@@ -12,11 +12,54 @@ failover drill on real GCP VMs (m1/m2/m3), Apr 2026.
 | **Milvus 2.5 + Pulsar** (default cfg) | ~50s | `code=106 collection on recovering` until querycoord rebalances channels | retry with backoff; bring node back |
 | **Milvus 2.5 + Pulsar** (tuned cfg) | ~15–20s | same `code=106` window, just shorter | same as above |
 
+### What the SDK sees on 2.5 vs 2.6
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as pymilvus client
+  participant LB as nginx LB on survivor
+  participant Q as querynodes
+  Note over Q: a querynode dies at T0
+
+  rect rgb(255, 235, 235)
+    Note over C,Q: 2.5 channel-reassignment window
+    C->>LB: search
+    LB->>Q: route to surviving qn
+    Q-->>LB: code=106 collection on recovering
+    LB-->>C: error
+    Note over Q: querycoord detects via session.ttl<br/>default 30s, tuned 10s,<br/>plus checkNodeSessionInterval<br/>default 60s, tuned 10s,<br/>plus channel rebalance
+    C->>LB: search retry
+    LB->>Q: route to surviving qn
+    Q-->>LB: hits
+    LB-->>C: ok
+    Note over C: ~50s untuned, ~15-20s tuned
+  end
+
+  rect rgb(235, 245, 255)
+    Note over C,Q: 2.6 invisible to SDK
+    C->>LB: search
+    LB->>Q: route to surviving qn already serves
+    Q-->>LB: hits
+    LB-->>C: ok
+    Note over C: no recovery window observed
+  end
+```
+
 The watchdog (`milvus-onprem watchdog`, optionally as a systemd unit
 via `install --with-watchdog`) emits a `PEER_DOWN_ALERT` after
 `WATCHDOG_FAILURE_THRESHOLD` consecutive misses (default 6 × 5s = 30s)
 on **any** topology. It is independent of Milvus's own failure
-detection and is purely an alerting loop.
+detection and is purely an alerting loop:
+
+```mermaid
+flowchart LR
+  A[node-3 unreachable] --> B{6 consecutive<br/>5s probes fail?}
+  B -- yes --> C[PEER_DOWN_ALERT<br/>journald]
+  B -- no --> A
+  C --> D[node-3 reachable again]
+  D --> E[PEER_UP_ALERT<br/>was_down_for_s=N]
+```
 
 ## What's actually happening
 

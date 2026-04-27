@@ -292,6 +292,37 @@ What is automated and what is operator-coordinated:
 
 ### Procedure
 
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Op as Operator
+  participant N1 as orchestrator
+  participant N2 as other peers
+  participant N4 as new VM
+
+  Op->>N1: add-node --new-ip=...
+  N1->>N1: etcdctl member add online; Raft accepts
+  N1->>N1: cluster.env grows; PEER_IPS appends new-ip
+  N1->>N1: render and nginx reload
+  N1-->>Op: prints next-step instructions
+
+  Op->>N2: update-peers --peer-ips=...
+  N2->>N2: cluster.env, render, nginx reload
+
+  Note over Op,N4: MinIO rolling restart, manual,<br/>one peer at a time
+  Op->>N1: docker compose ... force-recreate minio
+  Op->>N2: docker compose ... force-recreate minio
+
+  Op->>N1: pair, token issued
+  N1-->>Op: token
+  Op->>N4: join orchestrator:19500 token --existing
+  N4->>N1: GET /cluster.env
+  N1-->>N4: cluster.env with N+1 peers
+  N4->>N4: bootstrap with ETCD_INITIAL_CLUSTER_STATE=existing
+  N4->>N1: etcd Raft handshake; member already registered
+  N4-->>Op: bootstrap complete; new node green
+```
+
 In order, on the indicated nodes:
 
 ```bash

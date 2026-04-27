@@ -22,20 +22,36 @@ asks them to either run a single host (no HA) or stand up Kubernetes
 
 ## What it is
 
-```
-                                  Clients
-                                     │
-         ┌───────────────────────────┼───────────────────────────┐
-         ▼                           ▼                           ▼
-  ┌───────────┐               ┌───────────┐               ┌───────────┐
-  │  node-1   │               │  node-2   │               │  node-N   │
-  │           │               │           │               │           │
-  │  nginx    │               │  nginx    │     ...       │  nginx    │
-  │  Milvus   │   etcd Raft   │  Milvus   │   etcd Raft   │  Milvus   │
-  │  + WAL    │◄────────────► │  + WAL    │◄────────────► │  + WAL    │
-  │  etcd     │               │  etcd     │               │  etcd     │
-  │  MinIO    │◄──erasure-────│  MinIO    │◄──erasure-───►│  MinIO    │
-  └───────────┘   coding      └───────────┘   coding      └───────────┘
+```mermaid
+flowchart LR
+  C[pymilvus client]
+
+  subgraph node1["node-1"]
+    N1[nginx :19537] --> M1[Milvus + WAL]
+    M1 --> E1[(etcd)]
+    M1 --> S1[(MinIO drive)]
+  end
+  subgraph node2["node-2"]
+    N2[nginx :19537] --> M2[Milvus + WAL]
+    M2 --> E2[(etcd)]
+    M2 --> S2[(MinIO drive)]
+  end
+  subgraph nodeN["node-N"]
+    NN[nginx :19537] --> MN[Milvus + WAL]
+    MN --> EN[(etcd)]
+    MN --> SN[(MinIO drive)]
+  end
+
+  C --> N1
+  C --> N2
+  C --> NN
+
+  E1 <-->|Raft| E2
+  E2 <-->|Raft| EN
+  E1 <-->|Raft| EN
+  S1 <-.->|erasure coding| S2
+  S2 <-.->|erasure coding| SN
+  S1 <-.->|erasure coding| SN
 ```
 
 A CLI plus modular bash that deploys a redundant Milvus 2.6 cluster
@@ -51,6 +67,19 @@ Single binary CLI: `milvus-onprem`. Run `init` once per node, `bootstrap`
 to deploy, `pair`/`join` to distribute config across N peers in one step.
 
 ## Quick start (3 nodes)
+
+The deploy lifecycle:
+
+```mermaid
+flowchart LR
+  A[clone repo<br/>on every node] --> B[node-1: <code>init</code>]
+  B --> C[node-1: <code>pair</code><br/>prints token]
+  C --> D[node-2: <code>join</code> · token]
+  C --> E[node-N: <code>join</code> · token]
+  D --> F[node-1: <code>bootstrap</code>]
+  E --> F
+  F --> G[<code>status</code> · all green]
+```
 
 ```bash
 # on every node — one-time setup:
@@ -86,20 +115,32 @@ For the full walkthrough with diagrams, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT
 
 ## What you get
 
-- **Single CLI** — 14 commands covering deploy, status, scale, backup
-  (create / export / restore / etcd-snapshot), teardown.
+- **One CLI**, ~20 commands covering the full lifecycle: deploy
+  (`init` / `pair` / `join` / `bootstrap`), day-2 (`status` / `wait` /
+  `up` / `down` / `ps` / `logs` / `urls` / `version` / `smoke`), backup
+  (`create-backup` / `export-backup` / `restore-backup` / `backup-etcd`),
+  scale-out (`add-node` / `update-peers`), system install
+  (`install --with-watchdog` / `uninstall`), and `teardown`.
 - **N-node from day 1** — 1 (standalone), 3, 5, 7, 9. Even sizes are
   rejected (no Raft quorum).
 - **Auto-failover for single-VM loss** — etcd Raft handles it, no
   operator intervention needed if you have proper quorum.
+- **Online scale-out** — `add-node` adds a new peer to a running
+  cluster (etcd member-add + cluster.env propagation +
+  `join --existing`). MinIO server-list change is operator-coordinated
+  rolling restart; the rest is automated.
+- **Watchdog** — opt-in alert-mode poller (systemd unit) that emits
+  `PEER_DOWN_ALERT` / `PEER_UP_ALERT` to journald when a peer drops.
 - **Multi-version Milvus** — ships templates for 2.6.x (default,
-  Woodpecker WAL) and 2.5.x (Pulsar singleton). Switch by changing
-  `MILVUS_IMAGE_TAG` in cluster.env. Future versions = drop in
-  `templates/X.Y/`.
+  Woodpecker WAL) and 2.5.x (coord-mode-cluster + Pulsar singleton).
+  Switch by changing `MILVUS_IMAGE_TAG` in cluster.env. Future versions
+  = drop in `templates/X.Y/`.
 - **Backup integration** — wraps the official `milvus-backup` CLI for
   create/restore. Designed around the "100GB-from-developer" import case.
-- **Per-port customisation** — every port (Milvus, MinIO, etcd, nginx,
-  pair) configurable via cluster.env or `init` flags.
+  Cross-version restore (2.5 backup → 2.6 cluster) validated.
+- **Per-port + per-image customisation** — every port and every
+  container image repo is configurable in `cluster.env` (override
+  `*_IMAGE_REPO` for air-gapped registries).
 - **No Kubernetes** — runs on any Linux VM with Docker.
 
 ## What it's not
@@ -153,10 +194,12 @@ nodes can `nc -zv <peer-ip> 2379` each other, you're good.
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | You want to understand how the components fit together. |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | First-time deploy. Step-by-step with diagrams. |
-| [docs/CONFIG.md](docs/CONFIG.md) | cluster.env reference — every variable, every default. |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-2: status, smoke, backup, restore. |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → fix table. Things people have actually hit. |
+| [docs/CONFIG.md](docs/CONFIG.md) | `cluster.env` reference — every variable, every default. |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-2: status, smoke, backup, restore, scale-out. |
+| [docs/FAILOVER.md](docs/FAILOVER.md) | What happens when a node dies — 2.5 vs 2.6 behavior, retry pattern, recovery tunings. |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → fix table. Things people have actually hit, including permanently-lost-node recovery. |
 | [test/tutorial/README.md](test/tutorial/README.md) | 10-step pymilvus walkthrough for the dev team. |
+| [templates/2.5/README.md](templates/2.5/README.md) · [templates/2.6/README.md](templates/2.6/README.md) | Per-version topology notes. |
 
 ## Versioning
 

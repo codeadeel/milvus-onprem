@@ -465,6 +465,39 @@ in `PEER_IPS`.
 > quorum can accept the member-remove. On a 3-node cluster you need
 > 2 healthy nodes; on a 5-node cluster you need 3.
 
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Op as Operator
+  participant Survivor as healthy peer
+  participant Etcd as etcd cluster
+  participant Repl as replacement node
+
+  Note over Repl: dead, data lost,<br/>or reimaged
+
+  Op->>Survivor: status, etcdctl endpoint health
+  Survivor-->>Op: target unreachable; quorum OK
+
+  Op->>Survivor: etcdctl member remove old-id
+  Survivor->>Etcd: remove
+  Etcd-->>Survivor: now N-1 members
+  Op->>Survivor: etcdctl member add node-N --peer-urls=...:2380
+  Survivor->>Etcd: add
+  Etcd-->>Survivor: new member-id, status unstarted
+
+  Op->>Survivor: pair, issues token
+  Survivor-->>Op: token
+
+  Op->>Repl: join survivor:19500 token --existing
+  Repl->>Survivor: GET /cluster.env
+  Survivor-->>Repl: cluster.env
+  Repl->>Repl: bootstrap with state=existing
+  Repl->>Etcd: handshake matches the unstarted entry
+  Etcd-->>Repl: accepted; Raft snapshot
+  Repl-->>Op: bootstrap complete; cluster green
+  Note over Etcd: MinIO heal runs in<br/>background; data rebuilds<br/>from surviving shares
+```
+
 #### Step 1 — confirm what's dead and what isn't
 
 From any healthy peer:
