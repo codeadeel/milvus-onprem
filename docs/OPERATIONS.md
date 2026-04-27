@@ -255,64 +255,82 @@ in TROUBLESHOOTING.md.
 
 ## Scale-out (add a node to an existing cluster)
 
-**Not yet implemented in v0.** Adding a node to a running cluster
-requires careful etcd member-add coordination + MinIO re-balancing.
-Planned for v0.x.
+The `milvus-onprem add-node` + `update-peers` + `join --existing`
+trio handles online scale-out without a teardown / restore cycle.
+What is automated and what is operator-coordinated:
 
-For now, scale-out requires a planned migration:
-1. Take a `create-backup`.
-2. `teardown --full` on every node.
-3. Stand up a new cluster with the larger `PEER_IPS`.
-4. `restore-backup` from the snapshot.
+### What's automated
 
-Estimated time: hours to a day, depending on data size. Not great —
-the scale-out story is the next big v0.x priority.
+- **etcd member-add.** `add-node` calls `etcdctl member add` against
+  the existing cluster from any healthy peer. etcd Raft handles online
+  member changes correctly — surviving peers learn via gossip; the new
+  node starts with `ETCD_INITIAL_CLUSTER_STATE=existing`.
+- **`cluster.env` and template propagation.** `add-node` updates the
+  orchestrator's `cluster.env` and re-renders. `update-peers` does the
+  same on every other existing peer. nginx is reloaded
+  (non-disruptive) so its upstream list picks up the new node. The
+  joiner gets the updated `cluster.env` via the existing `pair` HTTP
+  rendezvous and runs `join --existing`, which sets the right etcd
+  state and runs bootstrap.
 
-### Design notes for the eventual `add-node` command
+### What's operator-coordinated
 
-Captured here so a future session can pick up without re-deriving:
+- **MinIO server-list change.** Distributed MinIO takes its server
+  list at startup and does not support online member addition to the
+  same pool. Going from N to N+1 nodes requires every existing MinIO
+  to restart with the new server-list argument. The system stays
+  available across the rolling restart only if you do them one at a
+  time and wait for healthchecks between each — and even then, until
+  the new node's MinIO is up with the same server list, the cluster
+  is in a degraded state. Plan a brief MinIO maintenance window.
 
-**etcd path** (the easy part): `etcdctl member add node-N
---peer-urls=http://NEW_IP:2380` from any healthy peer registers the
-new member. The new node then starts etcd with
-`ETCD_INITIAL_CLUSTER_STATE=existing` and an `--initial-cluster` list
-that *includes itself*. Existing nodes don't restart (their etcd has
-its data dir; `--initial-cluster-state=new` is ignored on subsequent
-boots).
+  The alternative is `mc admin pool add` for server-pool expansion,
+  which adds the new node as a *separate* erasure-coded pool. New
+  writes go to whichever pool has space; existing data stays where
+  it is. Different operational shape — usually not what users mean
+  by "add a node," but no MinIO downtime.
 
-**MinIO path** (the hard part): distributed MinIO takes its server
-list at startup and **does not support online member addition to the
-same pool**. To grow a 3-node cluster to 4, every existing MinIO has
-to restart with the 4-server `MINIO_SERVER_CMD`. Two viable options:
+### Procedure
 
-- *Rolling restart*: stop/start MinIO on each node sequentially (one
-  at a time, wait for healthcheck, move to next). Erasure coding
-  tolerates one drive missing, so reads/writes degrade but don't
-  fail. Implementable as a `cmd_add_node.sh` step.
-- *Server-pool expansion*: `mc admin pool add` adds the new node as
-  a *separate* pool. New writes go to the new pool until it equalises;
-  existing data stays on the original pool. Different operational
-  shape — usually not what users mean by "add a node".
+In order, on the indicated nodes:
 
-**Cluster.env propagation**: every existing peer's `cluster.env`
-needs `PEER_IPS` extended with the new IP. Re-render is required so
-the milvus.yaml `etcd.endpoints` block picks up the new peer. nginx
-LB upstream list also needs the new node. Existing milvus / nginx
-containers need a restart for the rendered changes to take effect
-(milvus picks up etcd endpoints on start; nginx re-reads its config
-on `up -d --force-recreate nginx`).
+```bash
+# 1. On any healthy existing peer (the orchestrator):
+./milvus-onprem add-node --new-ip=10.0.0.13 [--new-name=node-4]
+# (or: ... --dry-run to preview)
 
-**New-node bootstrap**: needs a variant of `pair`/`join` that flips
-`ETCD_INITIAL_CLUSTER_STATE=existing` and skips the initial-bootstrap
-self-checks. Cheapest path: extend `cmd_pair.sh` with `--add-node`
-that emits the joiner's required env, plus `cmd_join.sh` accepting
-`--existing` to set the state.
+# 2. On every OTHER existing peer (not the orchestrator), with the
+#    new PEER_IPS list printed by step 1:
+./milvus-onprem update-peers --peer-ips=10.0.0.10,10.0.0.11,10.0.0.12,10.0.0.13
 
-**Why this is deferred**: each of the four parts is small in isolation,
-but the orchestration is hairy and the failure modes are global
-(half-added node = split-brain etcd, MinIO refusing reads). It needs a
-4th VM in CI to validate end-to-end before shipping. Revisit when one
-is available.
+# 3. (MinIO) coordinate a rolling restart of MinIO on every existing
+#    peer. On each, in sequence (wait for healthy between):
+docker compose -f rendered/<node-name>/docker-compose.yml \
+  up -d --force-recreate minio
+
+# 4. On the orchestrator: serve the updated cluster.env to the new node.
+./milvus-onprem pair
+
+# 5. On the NEW VM:
+./milvus-onprem join <orchestrator-ip>:19500 <token> --existing
+```
+
+### Validation status
+
+- ✅ etcd member-add path validated against a live 3-node cluster
+  (added a TEST-NET-1 192.0.2.x member, confirmed quorum held with
+  3-of-4, removed cleanly).
+- ✅ `add-node` end-to-end on the orchestrator side: cluster.env
+  edited, templates re-rendered, nginx reloaded, no impact to running
+  cluster.
+- ✅ `update-peers` and `join --existing` have help text, dry-run mode,
+  argument validation (refuses self-removal, refuses already-present
+  IPs, requires healthy etcd).
+- ⏳ End-to-end with a real 4th VM: not yet run (no spare VM today).
+  When a 4th VM is available, the procedure above is the validation
+  test — `add-node` on m1, `update-peers` on m2/m3, MinIO rolling
+  restart, `join --existing` on m4, then `smoke` and
+  `05_prove_replication.py` should pass with the new peer included.
 
 ---
 

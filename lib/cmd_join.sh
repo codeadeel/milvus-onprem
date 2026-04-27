@@ -17,16 +17,30 @@ _CMD_JOIN_SH_LOADED=1
 cmd_join() {
   if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || $# -lt 2 ]]; then
     cat <<EOF
-Usage: milvus-onprem join <bootstrap-ip>:<port> <token>
+Usage: milvus-onprem join <bootstrap-ip>:<port> <token> [--existing]
 
 Fetch cluster.env from the bootstrap node and run bootstrap locally.
 The bootstrap-ip:port and token come from the bootstrap node's
 \`milvus-onprem pair\` output.
+
+  --existing    Join an EXISTING running cluster (this node was added
+                via \`milvus-onprem add-node\` on a healthy peer, not
+                part of the original \`init\` set). Sets
+                ETCD_INITIAL_CLUSTER_STATE=existing so etcd joins
+                rather than trying to bootstrap a new Raft cluster.
+                Default (omitted): node is part of the initial deploy.
 EOF
     [[ $# -lt 2 ]] && return 1 || return 0
   fi
 
-  local pair_addr="$1" token="$2"
+  local pair_addr="$1" token="$2"; shift 2
+  local existing=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --existing) existing=1; shift ;;
+      *) die "unknown flag: $1 (try --help)" ;;
+    esac
+  done
 
   if [[ -f "$CLUSTER_ENV" ]]; then
     die "cluster.env already exists at $CLUSTER_ENV — \`milvus-onprem teardown --full --force\` first if you really want to re-join"
@@ -54,6 +68,11 @@ EOF
 
   info "==> joining as $NODE_NAME ($LOCAL_IP)"
   host_prep "$DATA_ROOT"
+
+  if (( existing )); then
+    info "==> joining EXISTING cluster (etcd state=existing)"
+    export ETCD_INITIAL_CLUSTER_STATE=existing
+  fi
 
   info "==> running bootstrap"
   cmd_bootstrap

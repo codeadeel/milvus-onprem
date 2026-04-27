@@ -14,7 +14,7 @@ _milvus_onprem_complete() {
     }
 
     local subcommands="init render up down bootstrap status wait teardown \
-                       pair join \
+                       pair join add-node update-peers \
                        backup-etcd create-backup export-backup restore-backup \
                        smoke version urls ps logs watchdog \
                        install uninstall help"
@@ -40,8 +40,17 @@ _milvus_onprem_complete() {
         init)
             COMPREPLY=( $(compgen -W "--peer-ips= --milvus-image-tag= --overwrite --help" -- "$cur") )
             ;;
-        bootstrap|status|wait|up|down|render|smoke|version|urls|ps|backup-etcd|pair|join|watchdog)
+        bootstrap|status|wait|up|down|render|smoke|version|urls|ps|backup-etcd|pair|watchdog)
             COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+            ;;
+        join)
+            COMPREPLY=( $(compgen -W "--existing --help" -- "$cur") )
+            ;;
+        add-node)
+            COMPREPLY=( $(compgen -W "--new-ip= --new-name= --dry-run --help" -- "$cur") )
+            ;;
+        update-peers)
+            COMPREPLY=( $(compgen -W "--peer-ips= --dry-run --help" -- "$cur") )
             ;;
         create-backup)
             COMPREPLY=( $(compgen -W "--name= --strategy= --help" -- "$cur") )

@@ -49,6 +49,12 @@ Usage: milvus-onprem <command> [options]
 
   pair             (bootstrap node) Serve cluster.env to peers via HTTP rendezvous.
   join             (other peers) Fetch cluster.env from bootstrap node and bootstrap.
+                   Pass --existing to join a cluster that's already running.
+
+  add-node         (existing peer) Add a new Nth node to a running cluster:
+                   etcd member-add + local cluster.env update + nginx reload.
+  update-peers     (other existing peers) Propagate the new PEER_IPS locally
+                   after add-node has updated the orchestrator's cluster.env.
 
   backup-etcd      Snapshot the local etcd store to a .db file.
   create-backup    Take a milvus-backup snapshot of the live data (stored in MinIO).
@@ -89,6 +95,8 @@ main() {
     teardown)        cmd_teardown        "$@" ;;
     pair)            cmd_pair            "$@" ;;
     join)            cmd_join            "$@" ;;
+    add-node)        cmd_add_node        "$@" ;;
+    update-peers)    cmd_update_peers    "$@" ;;
     backup-etcd)     cmd_backup_etcd     "$@" ;;
     create-backup)   cmd_create_backup   "$@" ;;
     export-backup)   cmd_export_backup   "$@" ;;
