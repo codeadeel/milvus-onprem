@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# =============================================================================
+# commit-msg hook — refuse commit messages that name an AI assistant.
+#
+# Companion to hooks/pre-commit. The pre-commit hook scans the staged
+# diff; this one scans the message itself, which `pre-commit` can't see.
+#
+# Install:  ln -s ../../hooks/commit-msg .git/hooks/commit-msg
+# Override: git commit --no-verify
+# =============================================================================
+
+set -euo pipefail
+
+msg_file="${1:?commit-msg hook requires the message file path}"
+
+patterns=(
+  '\bclaude\b'
+  '\banthropic\b'
+  '\bco-authored.by\b'
+  '\bagent\b'
+  '\bAI\b'
+  '\bassistant\b'
+  '\bLLM\b'
+)
+
+re="$(IFS='|'; printf '%s' "${patterns[*]}")"
+
+# Skip comment lines (# ...) since git fills the template with them
+# and they're stripped from the final message.
+hits="$(grep -vE '^\s*#' "$msg_file" \
+        | grep -inE "$re" \
+        || true)"
+
+if [[ -n "$hits" ]]; then
+  cat >&2 <<EOF
+
+commit-msg: refusing commit message containing AI-assistant references.
+
+  Hits:
+$(printf '%s\n' "$hits" | sed 's/^/    /')
+
+  Patterns checked: ${patterns[*]}
+
+  Rewrite the message to neutral phrasing. The message is preserved at
+  $msg_file — re-run \`git commit -e -F $msg_file\` to edit and try
+  again. Bypass: git commit --no-verify
+EOF
+  exit 1
+fi
+
+exit 0
