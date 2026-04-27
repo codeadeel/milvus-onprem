@@ -454,6 +454,125 @@ Restore from those:
 
 ## Failover and recovery
 
+### Replacing a permanently-lost node
+
+Use this when a node is gone for good — disk failure, reimaged VM,
+hardware retired. The procedure removes the dead member from etcd's
+Raft cluster, then brings a replacement up that fills the same slot
+in `PEER_IPS`.
+
+> Prerequisite: at least `ceil(N/2)` peers are still healthy so etcd
+> quorum can accept the member-remove. On a 3-node cluster you need
+> 2 healthy nodes; on a 5-node cluster you need 3.
+
+#### Step 1 — confirm what's dead and what isn't
+
+From any healthy peer:
+
+```bash
+./milvus-onprem status
+docker exec milvus-etcd etcdctl --endpoints=http://127.0.0.1:2379 \
+  endpoint health --cluster
+```
+
+The dead peer should show `[FAIL]` in `peer reachability` and
+`unhealthy` / `connection refused` in the etcd cluster check. Make
+sure the surviving peers report healthy themselves.
+
+#### Step 2 — remove the dead member from etcd
+
+```bash
+# from any healthy peer:
+docker exec milvus-etcd etcdctl --endpoints=http://127.0.0.1:2379 \
+  member list
+
+# find the row for the dead node (matches its --peer-urls), copy
+# the member-id (first column), and:
+docker exec milvus-etcd etcdctl --endpoints=http://127.0.0.1:2379 \
+  member remove <member-id-hex>
+```
+
+`member list` will now show only the surviving peers. Quorum is now
+`ceil((N-1)/2)`; the cluster keeps serving reads/writes.
+
+#### Step 3 — bring up the replacement node
+
+You have two options depending on whether the new VM gets the *same*
+IP as the dead one or a different one.
+
+**Option A: same IP (reimaged or rebooted-with-fresh-disk):**
+
+On the replacement VM, repo cloned, no `cluster.env` yet:
+
+```bash
+cd ~/milvus-onprem
+# fetch cluster.env from any healthy peer using a fresh pair token:
+#   on a healthy peer:    ./milvus-onprem pair       (new token)
+#   on the replacement:   ./milvus-onprem join <healthy-ip>:19500 <token>
+```
+
+`join` runs `host_prep` and then bootstraps. Because the etcd member
+was already removed in Step 2, the new node's etcd will join as a
+fresh member of the existing cluster.
+
+**Option B: new IP (different VM, same slot in `PEER_IPS`):**
+
+Edit `cluster.env` on every healthy peer to replace the dead IP with
+the new one (the slot — node-1, node-2, etc. — must stay the same).
+Re-render and recreate containers so milvus.yaml's etcd endpoints
+list and nginx upstreams pick up the new IP:
+
+```bash
+# on each healthy peer:
+cd ~/milvus-onprem
+sed -i 's/<dead-ip>/<new-ip>/' cluster.env
+./milvus-onprem render
+docker compose -f rendered/<node-name>/docker-compose.yml up -d --force-recreate milvus-nginx
+# (other containers re-read milvus.yaml on next normal restart)
+```
+
+Then on the replacement VM, follow Option A's `pair`/`join`
+instructions (the fetched cluster.env will already have the new IP).
+
+#### Step 4 — re-add the etcd member
+
+Once etcd is up on the replacement node and listening on `:2380`:
+
+```bash
+# on a healthy peer:
+docker exec milvus-etcd etcdctl --endpoints=http://127.0.0.1:2379 \
+  member add <node-name> --peer-urls=http://<new-ip>:2380
+```
+
+Note: `bootstrap` already runs `etcd` with
+`ETCD_INITIAL_CLUSTER_STATE=new` because that's what the rendered
+docker-compose says. For a node joining an *existing* cluster, the
+state should be `existing` and `--initial-cluster` should list all
+peers. Today we work around this by removing+re-adding rather than
+hot-joining: the new etcd's data dir is empty, so it learns the
+state from peers via Raft snapshot. Future scale-out work
+(`add-node`) will template this properly.
+
+#### Step 5 — verify
+
+```bash
+# from any peer:
+./milvus-onprem status                        # all peers green
+./milvus-onprem wait                          # converges in seconds
+docker exec milvus-etcd etcdctl --endpoints=http://127.0.0.1:2379 \
+  endpoint health --cluster                   # all members healthy
+python3 test/tutorial/05_prove_replication.py # cross-peer consistency
+```
+
+MinIO will lazily heal the new node's drive once it joins the
+distributed pool. Erasure-coded data is reconstructed from the
+surviving shards in the background — no manual action needed for
+small clusters.
+
+If `05_prove_replication.py` shows a peer returning fewer rows than
+the others, that's MinIO heal still in flight. Wait a few minutes
+on small datasets, longer on large ones, and re-run.
+
 ### Reads fail with `code=106 collection on recovering` after a node restart
 
 You're on Milvus 2.5 and a node just went down (planned reboot,

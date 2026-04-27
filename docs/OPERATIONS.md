@@ -220,9 +220,9 @@ Quick recovery procedure:
 
 If the data dir on the recovered node is **lost** (disk replaced,
 node reimaged), the node needs to clear its old etcd state and rejoin
-fresh. Currently this requires a manual `etcd member remove + member add +
-re-bootstrap` procedure — see "Replacing a permanently-lost node" in
-[TROUBLESHOOTING.md](TROUBLESHOOTING.md) (planned).
+fresh. The procedure is documented under
+["Replacing a permanently-lost node"](TROUBLESHOOTING.md#replacing-a-permanently-lost-node)
+in TROUBLESHOOTING.md.
 
 ---
 

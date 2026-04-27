@@ -120,4 +120,5 @@ For a transient outage (reboot, cable, container OOM):
 
 For a permanently-lost node (disk failure, reimage), the procedure
 involves `etcdctl member remove` + a fresh init/join — see
-[TROUBLESHOOTING.md](TROUBLESHOOTING.md) (planned section).
+[Replacing a permanently-lost node](TROUBLESHOOTING.md#replacing-a-permanently-lost-node)
+in TROUBLESHOOTING.md.
