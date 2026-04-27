@@ -62,6 +62,15 @@ _env_apply_defaults() {
   : "${NGINX_IMAGE_TAG:=1.27-alpine}"
   : "${PULSAR_IMAGE_TAG:=3.0.0}"
 
+  # Image repository overrides — set these in cluster.env to point at an
+  # internal registry mirror (air-gapped / restricted egress / corporate
+  # proxy). Defaults are the upstream public refs.
+  : "${MILVUS_IMAGE_REPO:=milvusdb/milvus}"
+  : "${ETCD_IMAGE_REPO:=quay.io/coreos/etcd}"
+  : "${MINIO_IMAGE_REPO:=minio/minio}"
+  : "${NGINX_IMAGE_REPO:=nginx}"
+  : "${PULSAR_IMAGE_REPO:=apachepulsar/pulsar}"
+
   : "${ETCD_CLIENT_PORT:=2379}"
   : "${ETCD_PEER_PORT:=2380}"
   : "${MINIO_API_PORT:=9000}"

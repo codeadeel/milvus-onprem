@@ -24,7 +24,7 @@ services:
 
   # --- etcd: ${CLUSTER_SIZE}-node Raft cluster ----------------------------
   etcd:
-    image: quay.io/coreos/etcd:${ETCD_IMAGE_TAG}
+    image: ${ETCD_IMAGE_REPO}:${ETCD_IMAGE_TAG}
     container_name: milvus-etcd
     network_mode: host
     restart: always
@@ -49,7 +49,7 @@ services:
 
   # --- MinIO: ${CLUSTER_SIZE}-node distributed cluster --------------------
   minio:
-    image: minio/minio:${MINIO_IMAGE_TAG}
+    image: ${MINIO_IMAGE_REPO}:${MINIO_IMAGE_TAG}
     container_name: milvus-minio
     network_mode: host
     restart: always
@@ -86,7 +86,7 @@ ${PULSAR_SERVICE_BLOCK}
   # real hardware: blank `mixture` → no coord ports bound; with the
   # explicit flags → all four bind and proxy converges.
   mixcoord:
-    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    image: ${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}
     container_name: milvus-mixcoord
     network_mode: host
     restart: always
@@ -107,7 +107,7 @@ ${PULSAR_SERVICE_BLOCK}
 
   # --- Milvus 2.5 proxy: gRPC entry, what nginx routes to -----------------
   proxy:
-    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    image: ${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}
     container_name: milvus-proxy
     network_mode: host
     restart: always
@@ -120,7 +120,7 @@ ${PULSAR_SERVICE_BLOCK}
 
   # --- Milvus 2.5 querynode: query / search worker ------------------------
   querynode:
-    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    image: ${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}
     container_name: milvus-querynode
     network_mode: host
     restart: always
@@ -133,7 +133,7 @@ ${PULSAR_SERVICE_BLOCK}
 
   # --- Milvus 2.5 datanode: ingest worker ---------------------------------
   datanode:
-    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    image: ${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}
     container_name: milvus-datanode
     network_mode: host
     restart: always
@@ -146,7 +146,7 @@ ${PULSAR_SERVICE_BLOCK}
 
   # --- Milvus 2.5 indexnode: index-build worker ---------------------------
   indexnode:
-    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    image: ${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}
     container_name: milvus-indexnode
     network_mode: host
     restart: always
@@ -159,7 +159,7 @@ ${PULSAR_SERVICE_BLOCK}
 
   # --- nginx: LB across all ${CLUSTER_SIZE} proxies on :${NGINX_LB_PORT} --
   nginx:
-    image: nginx:${NGINX_IMAGE_TAG}
+    image: ${NGINX_IMAGE_REPO}:${NGINX_IMAGE_TAG}
     container_name: milvus-nginx
     network_mode: host
     restart: always

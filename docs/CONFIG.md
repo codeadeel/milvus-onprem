@@ -58,9 +58,31 @@ a Pulsar singleton.
 | `ETCD_IMAGE_TAG` | `v3.5.25` | |
 | `MINIO_IMAGE_TAG` | `RELEASE.2024-05-28T17-19-04Z` | |
 | `NGINX_IMAGE_TAG` | `1.27-alpine` | |
+| `PULSAR_IMAGE_TAG` | `3.0.0` | 2.5 only. |
 
-All four images must be identical across peers. After editing, run
+All images must be identical across peers. After editing, run
 `./milvus-onprem render && ./milvus-onprem up` to roll the changes.
+
+### Image repositories (air-gapped / mirrored registries)
+
+| Variable | Default | Notes |
+|---|---|---|
+| `MILVUS_IMAGE_REPO` | `milvusdb/milvus` | |
+| `ETCD_IMAGE_REPO` | `quay.io/coreos/etcd` | |
+| `MINIO_IMAGE_REPO` | `minio/minio` | |
+| `NGINX_IMAGE_REPO` | `nginx` | |
+| `PULSAR_IMAGE_REPO` | `apachepulsar/pulsar` | 2.5 only. |
+
+Override these in `cluster.env` to point at an internal registry mirror
+when the cluster can't reach the public registries (air-gapped sites,
+restricted egress, corporate proxies). The full image reference at
+runtime is `${*_IMAGE_REPO}:${*_IMAGE_TAG}` — e.g. set
+`MILVUS_IMAGE_REPO=registry.internal.example.com/milvus` and the
+rendered docker-compose pulls
+`registry.internal.example.com/milvus:v2.6.11`.
+
+The `milvus-backup` binary is a separate concern — see
+[OPERATIONS.md "Air-gapped backup binary"](OPERATIONS.md#air-gapped-backup-binary).
 
 ### Supported Milvus versions
 

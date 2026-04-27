@@ -174,6 +174,33 @@ in standalone:
   **2.6 (Woodpecker) has no such concern** — the WAL is embedded in
   every Milvus instance, so any healthy node can flush.
 
+### Air-gapped backup binary
+
+`milvus-onprem create-backup` / `restore-backup` shell out to the
+upstream `milvus-backup` binary. On first use the binary is downloaded
+from `github.com/zilliztech/milvus-backup/releases` into
+`~/milvus-onprem/.local/bin/milvus-backup`. Subsequent runs find it
+cached and skip the download — no internet needed thereafter.
+
+For air-gapped sites or restricted-egress environments, pre-place the
+binary once on every node:
+
+```bash
+# on a connected machine, fetch the right asset for your target arch:
+ver=v0.5.14    # or whatever MILVUS_BACKUP_VERSION you've pinned
+curl -L -o /tmp/milvus-backup.tgz \
+  "https://github.com/zilliztech/milvus-backup/releases/download/${ver}/milvus-backup_${ver#v}_Linux_x86_64.tar.gz"
+
+# transfer the tarball into the air-gapped network, then on each peer:
+mkdir -p ~/milvus-onprem/.local/bin
+tar -xzf /path/to/milvus-backup.tgz -C ~/milvus-onprem/.local/bin/ milvus-backup
+chmod +x ~/milvus-onprem/.local/bin/milvus-backup
+```
+
+Once the binary is in place, every `create-backup`/`restore-backup`
+call is fully offline. The auto-fetch logic detects the cached file
+via `[[ -x "$MILVUS_BACKUP_BIN" ]]` and skips the GitHub download.
+
 A typical backup cron in HA:
 
 ```cron

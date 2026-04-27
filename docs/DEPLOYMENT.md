@@ -50,6 +50,28 @@ for the full list.
 The pair port (`19500`) is only used during the first deploy. After all
 peers have joined, it can be closed in your firewall.
 
+### Air-gapped / restricted-egress sites
+
+The cluster is fully cloud-agnostic — no `gcloud` / `aws` / `az` calls,
+no metadata service, no DNS dependencies, IP-only inter-node traffic.
+The only outbound dependencies are at *deploy time*:
+
+1. **Container image pulls** from public registries (`milvusdb`,
+   `quay.io/coreos`, `minio`, `apachepulsar`, `nginx`). For air-gapped
+   sites, mirror these to your internal registry and override the
+   `*_IMAGE_REPO` variables in `cluster.env` — see
+   [CONFIG.md "Image repositories"](CONFIG.md#image-repositories-air-gapped--mirrored-registries).
+2. **`milvus-backup` binary** download from GitHub on first
+   `create-backup` / `restore-backup`. Pre-place the binary at
+   `~/milvus-onprem/.local/bin/milvus-backup` on every peer to skip the
+   fetch — see
+   [OPERATIONS.md "Air-gapped backup binary"](OPERATIONS.md#air-gapped-backup-binary).
+
+At runtime the cluster runs entirely over local IPs. The required
+state — etcd Raft, distributed MinIO, Milvus etcd-based service
+discovery — uses peers in `PEER_IPS` directly. No external service
+resolution is performed.
+
 ---
 
 ## Deployment overview

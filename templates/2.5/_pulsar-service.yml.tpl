@@ -4,7 +4,7 @@
   # For real HA, run a separate 3-broker Pulsar cluster and point Milvus
   # at it via PULSAR_HOST=external:6650 (and remove this service).
   pulsar:
-    image: apachepulsar/pulsar:${PULSAR_IMAGE_TAG}
+    image: ${PULSAR_IMAGE_REPO}:${PULSAR_IMAGE_TAG}
     container_name: milvus-pulsar
     network_mode: host
     restart: always

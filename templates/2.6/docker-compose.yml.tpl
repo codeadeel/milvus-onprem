@@ -15,7 +15,7 @@ services:
   # Quorum-aware metadata store. Tolerates floor((${CLUSTER_SIZE}-1)/2)
   # member failures simultaneously.
   etcd:
-    image: quay.io/coreos/etcd:${ETCD_IMAGE_TAG}
+    image: ${ETCD_IMAGE_REPO}:${ETCD_IMAGE_TAG}
     container_name: milvus-etcd
     network_mode: host
     restart: always
@@ -43,7 +43,7 @@ services:
   # automatic single-drive parity. For 3 nodes, the cluster runs but with
   # tighter parity margins. For 1 node it runs as plain single-drive.
   minio:
-    image: minio/minio:${MINIO_IMAGE_TAG}
+    image: ${MINIO_IMAGE_REPO}:${MINIO_IMAGE_TAG}
     container_name: milvus-minio
     network_mode: host
     restart: always
@@ -65,7 +65,7 @@ services:
   # and shared object storage, multiple instances form a clustered Milvus
   # via etcd-based service discovery and leader election.
   milvus:
-    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    image: ${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}
     container_name: milvus
     network_mode: host
     restart: always
@@ -86,7 +86,7 @@ services:
   # Layer 4 (TCP) load balancer with passive health checks. Clients connect
   # to any node's :${NGINX_LB_PORT}; nginx routes to a healthy Milvus.
   nginx:
-    image: nginx:${NGINX_IMAGE_TAG}
+    image: ${NGINX_IMAGE_REPO}:${NGINX_IMAGE_TAG}
     container_name: milvus-nginx
     network_mode: host
     restart: always
