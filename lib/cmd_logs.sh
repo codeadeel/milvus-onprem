@@ -25,11 +25,16 @@ Usage: milvus-onprem logs <component> [--tail=N] [-f]
 
 Show container logs for one of:
 
-  etcd     -> milvus-etcd
-  minio    -> milvus-minio
-  milvus   -> milvus
-  nginx    -> milvus-nginx
-  pulsar   -> milvus-pulsar     (only on the PULSAR_HOST node, 2.5)
+  etcd       -> milvus-etcd
+  minio      -> milvus-minio
+  milvus     -> milvus              (2.6 only — single milvus container)
+  mixcoord   -> milvus-mixcoord     (2.5 only — all 4 coordinators)
+  proxy      -> milvus-proxy        (2.5 only — gRPC entry on :19530)
+  querynode  -> milvus-querynode    (2.5 only)
+  datanode   -> milvus-datanode     (2.5 only)
+  indexnode  -> milvus-indexnode    (2.5 only)
+  nginx      -> milvus-nginx
+  pulsar     -> milvus-pulsar       (only on the PULSAR_HOST node, 2.5)
 
   --tail=N      Show the last N lines (default: 100). N=0 means all.
   -f, --follow  Stream logs (Ctrl-C to stop).
@@ -42,16 +47,21 @@ EOF
     esac
   done
 
-  [[ -n "$component" ]] || die "missing component (one of: etcd minio milvus nginx pulsar). Try \`milvus-onprem logs --help\`."
+  [[ -n "$component" ]] || die "missing component. Try \`milvus-onprem logs --help\`."
 
   local container
   case "$component" in
-    etcd)   container="milvus-etcd" ;;
-    minio)  container="milvus-minio" ;;
-    milvus) container="milvus" ;;
-    nginx)  container="milvus-nginx" ;;
-    pulsar) container="milvus-pulsar" ;;
-    *)      die "unknown component '$component'. One of: etcd, minio, milvus, nginx, pulsar." ;;
+    etcd)      container="milvus-etcd" ;;
+    minio)     container="milvus-minio" ;;
+    milvus)    container="milvus" ;;
+    mixcoord)  container="milvus-mixcoord" ;;
+    proxy)     container="milvus-proxy" ;;
+    querynode) container="milvus-querynode" ;;
+    datanode)  container="milvus-datanode" ;;
+    indexnode) container="milvus-indexnode" ;;
+    nginx)     container="milvus-nginx" ;;
+    pulsar)    container="milvus-pulsar" ;;
+    *)         die "unknown component '$component'. Try \`milvus-onprem logs --help\` for the list." ;;
   esac
 
   if ! docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then

@@ -50,15 +50,6 @@ cmd_init() {
     *) die "PEER_IPS must have 1 (standalone) or odd >=3 entries; got $peer_count" ;;
   esac
 
-  # Refuse Milvus 2.5 + multi-node up-front. `milvus run standalone` panics
-  # on coord election (CompareAndSwap on key=rootcoord) when multiple
-  # instances share an etcd; this is an upstream 2.5 limitation. The same
-  # check lives in env.sh so any future load also refuses; we mirror it
-  # here so operators get the error at init time, not bootstrap time.
-  local mv="${milvus_image_tag#v}"
-  if [[ "$mv" =~ ^2\.5\. && "$peer_count" -gt 1 ]]; then
-    die "Milvus 2.5 + multi-node (CLUSTER_SIZE=$peer_count) is not supported in this build. \`milvus run standalone\` panics on coord election when multiple instances share an etcd; this is an upstream 2.5 limitation, not a milvus-onprem bug. Use Milvus 2.6 for HA (--milvus-image-tag=v2.6.x), or pass --peer-ips=<single-ip> for a 2.5 single-node deploy."
-  fi
 
   # Refuse to clobber existing cluster.env unless --overwrite.
   if [[ -f "$CLUSTER_ENV" && "$overwrite" -ne 1 ]]; then

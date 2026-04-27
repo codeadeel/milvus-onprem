@@ -51,10 +51,14 @@ flowchart LR
   S1 <-.->|erasure coding| SN
 ```
 
-Every node runs the same four containers. Clients hit any node's
-nginx; nginx round-robins to a healthy Milvus; Milvus reads/writes
-metadata in etcd (consensus-replicated) and segment data in MinIO
-(erasure-coded). No node is "special."
+Every node runs the same set of containers. On Milvus 2.6 that's four
+(etcd, minio, milvus, nginx); on 2.5 it's eight, because 2.5 is split
+into coord-mode-cluster components (see "Milvus 2.5" below). Clients
+hit any node's nginx; nginx round-robins to a healthy Milvus
+proxy/standalone; Milvus reads/writes metadata in etcd
+(consensus-replicated) and segment data in MinIO (erasure-coded). No
+node is "special" — except the PULSAR_HOST node on 2.5, which also
+runs the Pulsar singleton broker.
 
 ## Components per node
 
@@ -77,6 +81,26 @@ metadata in etcd (consensus-replicated) and segment data in MinIO
 - Embedded **Woodpecker** WAL — Milvus 2.6's built-in write-ahead log.
   Replaces the Pulsar/Kafka MQ that older Milvus versions required.
   Storage: WAL metadata in shared etcd, log segments in shared MinIO.
+
+### Milvus 2.5 (coord-mode cluster)
+
+2.5 cannot run multi-node HA in `milvus run standalone` — multiple
+standalone instances panic on rootcoord election when they share an
+etcd. So `templates/2.5/` deploys the components separately:
+
+- `mixcoord` — all 4 coordinators (rootcoord + datacoord + querycoord
+  + indexcoord) in one container, leader-elected via etcd. One per
+  node; only one is the active leader at a time.
+- `proxy` — gRPC entry on `${MILVUS_PORT}` (default `19530`); what
+  nginx LBs across peers.
+- `querynode` — query/search worker.
+- `datanode` — ingest worker.
+- `indexnode` — index-build worker.
+
+Plus a Pulsar broker on PULSAR_HOST (singleton; see Pulsar section
+below). Net per-node container count: 8 on regular peers, 9 on
+PULSAR_HOST. Higher than 2.6's 4-per-node, but it's the topology 2.5
+was designed for.
 
 ### etcd (consensus store)
 

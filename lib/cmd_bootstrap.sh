@@ -79,8 +79,15 @@ cmd_bootstrap() {
   fi
 
   # --- Stage 4: start Milvus + nginx ------------------------------------
+  # Milvus 2.6 ships as a single `milvus run standalone` per node; 2.5
+  # ships as a coord-mode-cluster (mixcoord + proxy + querynode + datanode
+  # + indexnode), so the service set differs by version.
   info "==> Stage 4/7: start Milvus"
-  dc up -d milvus
+  if [[ "$MILVUS_VERSION" == "2.5" ]]; then
+    dc up -d mixcoord proxy querynode datanode indexnode
+  else
+    dc up -d milvus
+  fi
 
   info "==> Stage 5/7: start nginx LB"
   dc up -d nginx

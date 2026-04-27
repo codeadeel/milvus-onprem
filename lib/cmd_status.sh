@@ -80,9 +80,14 @@ _probe() {
   fi
 }
 
-# Local Milvus healthcheck — proxy/healthz on localhost.
+# Local Milvus healthcheck. 2.6 standalone exposes /healthz on
+# MILVUS_HEALTHZ_PORT; 2.5 cluster mode runs the proxy as its own
+# container without an HTTP healthz on a stable port. TCP-probing the
+# gRPC port works for both topologies and matches what the watchdog
+# and `_milvus_peer_reachable` already check, so the local and peer
+# views stay consistent.
 _milvus_local_health() {
-  curl -sf --max-time 3 "http://127.0.0.1:${MILVUS_HEALTHZ_PORT}/healthz" >/dev/null
+  timeout 3 bash -c "</dev/tcp/127.0.0.1/$MILVUS_PORT" 2>/dev/null
 }
 
 _milvus_peer_reachable() {

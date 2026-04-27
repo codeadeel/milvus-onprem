@@ -137,18 +137,12 @@ _env_validate_mq_type() {
 }
 
 # Reject (MILVUS_VERSION, CLUSTER_SIZE) combinations that don't actually
-# work in this build. Specifically: Milvus 2.5 in `milvus run standalone`
-# mode panics on coord election when multiple instances share an etcd
-# (`function CompareAndSwap error for compare is false for key: rootcoord`).
-# 2.6 fixed this; 2.5 was designed for true single-process standalone or
-# full coord-mode-cluster (separate rootcoord/datacoord/proxy/etc), not
-# the "monolith × N" pattern this tool deploys. So 2.5 is single-node-only.
+# work in this build. Currently: nothing — 2.5 multi-node now works via
+# coord-mode-cluster topology (mixcoord + proxy + querynode + datanode +
+# indexnode per node, each leader-elected through etcd). Kept as a stub
+# so future incompatible combinations have a clear home for the refusal.
 _env_validate_topology() {
-  local n
-  n="$(awk -F, '{print NF}' <<<"$PEER_IPS")"
-  if [[ "$MILVUS_VERSION" == "2.5" && "$n" -gt 1 ]]; then
-    die "Milvus 2.5 + multi-node (CLUSTER_SIZE=$n) is not supported in this build. \`milvus run standalone\` panics on coord election (CompareAndSwap on key=rootcoord) when multiple instances share an etcd; this is an upstream 2.5 limitation, not a milvus-onprem bug. Use Milvus 2.6 for HA (MILVUS_IMAGE_TAG=v2.6.x), or keep --peer-ips=<single-ip> for 2.5 single-node deploys."
-  fi
+  return 0
 }
 
 # -----------------------------------------------------------------------------

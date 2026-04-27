@@ -15,30 +15,26 @@ For day-2 operational tasks, see [OPERATIONS.md](OPERATIONS.md).
 
 ## Init / pair / join issues
 
-### `init`: `Milvus 2.5 + multi-node ... is not supported in this build`
+### Milvus 2.5 panics with `CompareAndSwap error ... for key: rootcoord`
 
-Milvus 2.5 in `milvus run standalone` mode panics on coord election
-when multiple instances share an etcd:
+If you see this in `docker logs milvus-mixcoord` or
+`docker logs milvus`, you are running `milvus run standalone` with
+multiple instances against a shared etcd — that mode does not support
+multi-instance HA. Every instance races to register itself as
+rootcoord; the N-1 losers panic and restart in a loop.
 
-```
-panic: function CompareAndSwap error for compare is false for key: rootcoord
-```
+Fix: use the coord-mode-cluster topology this tool ships in
+`templates/2.5/`. A correct 2.5 multi-node deploy runs
+`mixcoord` + `proxy` + `querynode` + `datanode` + `indexnode` per
+node (5 milvus-* containers, each in its own role), which is exactly
+the topology Milvus 2.5 was designed for. `milvus-onprem ps` on a
+healthy 2.5 multi-node cluster shows these 5 containers plus
+`milvus-etcd` / `milvus-minio` / `milvus-nginx` (and
+`milvus-pulsar` on PULSAR_HOST).
 
-Every node racing for `rootcoord` registration loses N-1 elections,
-each loss panics the process, the container restarts, and the cycle
-never converges. This is an upstream Milvus 2.5 limitation — 2.6 made
-coord election graceful (waits for election to settle), 2.5 was
-designed for either a true single-process standalone OR a full
-coord-mode cluster (separate `rootcoord`/`datacoord`/`querycoord`/
-proxy/worker components), not the "monolith × N" pattern this tool
-deploys.
-
-We refuse the combination at `init` (and again at any later `env_require`)
-so operators get the actionable error up front instead of staring at a
-2-Hz panic-loop in `docker logs milvus`.
-
-Use Milvus 2.6 for HA (`--milvus-image-tag=v2.6.x`), or stick to a
-single-node 2.5 deploy (`--peer-ips=<single-ip>`).
+If you previously initialised with the single-`milvus`-container
+template, `teardown --full --force` and re-run `init` against the
+current `templates/2.5/`.
 
 ### `init`: `--peer-ips is required`
 

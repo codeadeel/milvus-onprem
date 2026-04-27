@@ -4,11 +4,20 @@
 # DO NOT EDIT BY HAND. Re-render with `milvus-onprem render` after changes
 # to cluster.env. Source: templates/${MILVUS_VERSION}/docker-compose.yml.tpl
 #
-# Key difference from 2.6: this version uses Pulsar (no Woodpecker yet).
-# Pulsar runs as a singleton on PULSAR_HOST (default: node-1). The
-# pulsar service block is conditionally inlined by lib/render.sh —
-# only the host node's compose file actually contains it; others get
-# an empty block and just connect to Pulsar across the network.
+# Architecture difference from 2.6: Milvus 2.5 cannot run multi-node HA in
+# `milvus run standalone` mode (multiple instances panic on rootcoord
+# CompareAndSwap when sharing an etcd). Instead, each node runs the
+# components separately:
+#
+#   mixcoord   (all 4 coordinators in 1 container, leader-elected via etcd)
+#   proxy      (gRPC entry on :${MILVUS_PORT}, what nginx LBs across peers)
+#   querynode  (query worker)
+#   datanode   (ingest worker)
+#   indexnode  (index-build worker)
+#
+# Plus the existing etcd / minio / nginx (and pulsar singleton on PULSAR_HOST).
+# All milvus-* containers share the same milvus.yaml — each component reads
+# only the bits it needs.
 # =============================================================================
 
 services:
@@ -58,28 +67,77 @@ services:
       retries: 3
 
 ${PULSAR_SERVICE_BLOCK}
-  # --- Milvus 2.5: standalone-clustered, Pulsar-backed --------------------
-  # Same `milvus run standalone` mode as 2.6, but the MQ is the Pulsar
-  # singleton on PULSAR_HOST (${PULSAR_HOST}, ${PULSAR_HOST_IP}).
-  milvus:
+  # --- Milvus 2.5 mixcoord: all 4 coordinators in one process -------------
+  # rootcoord + datacoord + querycoord + indexcoord, leader-elected via etcd.
+  # Run on every node; only one is the active leader at any time, the
+  # others stand by. This is the path 2.5 was designed for, and the one
+  # `milvus run standalone` deliberately does not provide.
+  mixcoord:
     image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
-    container_name: milvus
+    container_name: milvus-mixcoord
     network_mode: host
     restart: always
-    command: ["milvus", "run", "standalone"]
+    command: ["milvus", "run", "mixcoord"]
     volumes:
       - ${DATA_ROOT}/milvus:/var/lib/milvus
       - ./milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - etcd
       - minio
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${MILVUS_HEALTHZ_PORT}/healthz"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
-  # --- nginx: LB across all ${CLUSTER_SIZE} Milvus instances on :${NGINX_LB_PORT}
+  # --- Milvus 2.5 proxy: gRPC entry, what nginx routes to -----------------
+  proxy:
+    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    container_name: milvus-proxy
+    network_mode: host
+    restart: always
+    command: ["milvus", "run", "proxy"]
+    volumes:
+      - ${DATA_ROOT}/milvus:/var/lib/milvus
+      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+    depends_on:
+      - mixcoord
+
+  # --- Milvus 2.5 querynode: query / search worker ------------------------
+  querynode:
+    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    container_name: milvus-querynode
+    network_mode: host
+    restart: always
+    command: ["milvus", "run", "querynode"]
+    volumes:
+      - ${DATA_ROOT}/milvus:/var/lib/milvus
+      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+    depends_on:
+      - mixcoord
+
+  # --- Milvus 2.5 datanode: ingest worker ---------------------------------
+  datanode:
+    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    container_name: milvus-datanode
+    network_mode: host
+    restart: always
+    command: ["milvus", "run", "datanode"]
+    volumes:
+      - ${DATA_ROOT}/milvus:/var/lib/milvus
+      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+    depends_on:
+      - mixcoord
+
+  # --- Milvus 2.5 indexnode: index-build worker ---------------------------
+  indexnode:
+    image: milvusdb/milvus:${MILVUS_IMAGE_TAG}
+    container_name: milvus-indexnode
+    network_mode: host
+    restart: always
+    command: ["milvus", "run", "indexnode"]
+    volumes:
+      - ${DATA_ROOT}/milvus:/var/lib/milvus
+      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+    depends_on:
+      - mixcoord
+
+  # --- nginx: LB across all ${CLUSTER_SIZE} proxies on :${NGINX_LB_PORT} --
   nginx:
     image: nginx:${NGINX_IMAGE_TAG}
     container_name: milvus-nginx
@@ -88,4 +146,4 @@ ${PULSAR_SERVICE_BLOCK}
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - milvus
+      - proxy

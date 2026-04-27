@@ -29,7 +29,7 @@ _milvus_onprem_complete() {
     case "${COMP_WORDS[1]}" in
         logs)
             if (( COMP_CWORD == 2 )); then
-                COMPREPLY=( $(compgen -W "etcd minio milvus nginx pulsar" -- "$cur") )
+                COMPREPLY=( $(compgen -W "etcd minio milvus mixcoord proxy querynode datanode indexnode nginx pulsar" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "--tail= -f --follow --help" -- "$cur") )
             fi
