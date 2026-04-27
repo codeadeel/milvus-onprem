@@ -452,6 +452,27 @@ Restore from those:
 
 ---
 
+## Failover and recovery
+
+### Reads fail with `code=106 collection on recovering` after a node restart
+
+You're on Milvus 2.5 and a node just went down (planned reboot,
+crash, container OOM). For ~50s after the failure, querycoord is
+detecting the dead querynode's etcd lease expiry and reassigning
+DML channels to surviving querynodes; reads against unassigned
+channels fail until that completes.
+
+This is **expected behavior** on 2.5 cluster mode. SDK callers must
+retry with backoff. The repo ships a small helper —
+[`retry_on_recovering`](../test/tutorial/_shared.py) — and a tuning
+recipe that drops the window to ~15-20s. Full background and the
+2.5 vs 2.6 difference live in [FAILOVER.md](FAILOVER.md).
+
+If you're on 2.6 and seeing this code, it's a different bug — capture
+`docker logs milvus` and `./milvus-onprem status` and open an issue.
+
+---
+
 ## Reporting new issues
 
 If you hit something not in this doc:

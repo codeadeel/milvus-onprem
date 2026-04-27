@@ -199,18 +199,24 @@ With proper N-node quorum (3+, odd), losing one node is mostly
 **automatic**. etcd's Raft quorum absorbs it; MinIO's distributed mode
 degrades gracefully; nginx routes around the dead Milvus.
 
-What to do:
+The detail you need to know is whether your cluster is on 2.5 or 2.6:
+on 2.6 a single node loss is invisible to the SDK; on 2.5 in-flight
+reads briefly see `code=106 collection on recovering` until querycoord
+rebalances channels (~50s untuned, ~15-20s with our tightened
+templates). Full breakdown, retry-helper recipe, and tuning recipe
+live in [FAILOVER.md](FAILOVER.md).
 
-1. **Don't panic.** The cluster is still operating with the surviving
-   `(N-1)` nodes. Verify with `./milvus-onprem status` from any
-   surviving node.
-2. **Investigate.** What happened to the dead node? OS crash? Disk
-   failure? Network?
-3. **Fix the underlying cause.** Reboot, replace disk, fix network.
-4. **Bring the node back online.** Just power it on — containers
-   auto-start (`restart: always`). etcd on the recovered node will
-   rejoin the cluster automatically.
-5. **Verify** with `./milvus-onprem status` on the recovered node.
+Quick recovery procedure:
+
+1. **Don't panic.** Cluster keeps serving from `(N-1)` nodes.
+2. **Retry SDK calls** that hit `code=106` — see
+   [`retry_on_recovering`](../test/tutorial/_shared.py).
+3. **Bring the node back**: `./milvus-onprem up`. Containers have
+   `restart: always`, so `systemctl start docker` after a host reboot
+   is often enough.
+4. **Verify** with `./milvus-onprem status` and `wait`.
+5. **Cross-peer consistency**:
+   `python3 test/tutorial/05_prove_replication.py`.
 
 If the data dir on the recovered node is **lost** (disk replaced,
 node reimaged), the node needs to clear its old etcd state and rejoin

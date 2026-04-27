@@ -52,10 +52,27 @@ pulsar:
 
 # -----------------------------------------------------------------------------
 # Common — disable RBAC by default. Users who need it can override here.
+#
+# session.ttl tightened from the upstream default (30) to 10. Combined
+# with the queryCoord tunings below, this drops the post-failover read
+# recovery window from ~50s to ~15-20s in 3-node drills. The tradeoff
+# is a higher chance of false-positive eviction under bursty network
+# jitter — fine on a LAN, lift toward defaults if you're across WAN.
+# See docs/FAILOVER.md.
 # -----------------------------------------------------------------------------
 common:
   security:
     authorizationEnabled: false
+  session:
+    ttl: 10
+
+# -----------------------------------------------------------------------------
+# queryCoord — tightened failure-detection so DML channels get
+# reassigned faster after a querynode dies. See docs/FAILOVER.md.
+# -----------------------------------------------------------------------------
+queryCoord:
+  checkNodeSessionInterval: 10
+  heartbeatAvailableInterval: 5000
 
 log:
   level: info
