@@ -213,35 +213,55 @@ async def _decommission_state(target_url_fragment: str) -> str:
     `target_url_fragment` (e.g. "10.0.0.5:9000/drive").
 
     Possible return values:
-      "active"   — decommission in progress for this pool
-      "complete" — decommission finished
-      "missing"  — pool not present in the status table (already
-                   removed, or never existed)
-      "none"     — no decommission has been started
+      "none"     — no decommission has been started for this pool
+      "active"   — decommission started, in progress
+      "complete" — decommission finished successfully
+      "failed"   — decommission errored
+      "canceled" — decommission was cancelled
+      "missing"  — pool not present in the status output
 
-    The mc CLI doesn't expose --json on this subcommand consistently
-    across versions, so we parse the text table. Surviving pools'
-    rows always show "Active" — we MUST check the specific row for
-    our target, not the whole output.
+    Uses `mc admin decommission status --json` because the
+    human-readable table is misleading: every pool's "Status" column
+    shows "Active" by default (meaning "online + serving"), not
+    "decommissioning in progress." JSON exposes the per-pool
+    `decommissionInfo.{startTime, complete, failed, canceled}` fields
+    which are unambiguous.
     """
-    rc, out, err = await _run(
-        "docker exec milvus-minio mc admin decommission status local"
-    )
-    combined_lower = (out + err).lower()
-    if "no decommission" in combined_lower:
-        return "none"
+    import json as _json
 
-    for line in out.splitlines():
-        if target_url_fragment not in line:
+    rc, out, err = await _run(
+        "docker exec milvus-minio mc admin decommission status local --json"
+    )
+    if rc != 0:
+        # mc returns non-zero with a clear message when nothing's been
+        # decommissioned ever; treat as "no pool", caller decides.
+        if "no decommission" in (out + err).lower():
+            return "none"
+
+    try:
+        pools = _json.loads(out) if out.strip() else []
+    except _json.JSONDecodeError:
+        # mc may produce non-json prefix; try to find the array.
+        return "missing"
+
+    for pool in pools:
+        cmdline = pool.get("cmdline", "")
+        if target_url_fragment not in cmdline:
             continue
-        line_lower = line.lower()
-        if "complete" in line_lower:
+        info = pool.get("decommissionInfo") or {}
+        if info.get("complete"):
             return "complete"
-        if "active" in line_lower:
+        if info.get("failed"):
+            return "failed"
+        if info.get("canceled"):
+            return "canceled"
+        # Decommission counts as "in progress" once startTime moves
+        # off the epoch-zero default. Otherwise it hasn't been
+        # started — caller should call `decommission start`.
+        start = info.get("startTime", "")
+        if start and not start.startswith("0001-01-01"):
             return "active"
-        # Row exists but neither status keyword present — be conservative
-        # and treat as still in progress.
-        return "active"
+        return "none"
 
     return "missing"
 
