@@ -137,17 +137,26 @@ etcd_wipe_local_data() {
 # Usage: etcd_backup [destination-path]    # default /tmp/etcd-snapshot-<ts>.db
 etcd_backup() {
   local dst="${1:-/tmp/etcd-snapshot-$(date +%Y%m%d-%H%M%S).db}"
+  # Per-call unique snapshot path — concurrent backup-etcd runs (e.g.
+  # operator script + daemon-side job) used to race on a shared
+  # /etcd-data/snapshot.db: etcdctl writes .db.part then renames to .db,
+  # but if two callers share the names, one's rename fails with "no such
+  # file or directory". Suffix the temp name with a random token so each
+  # call has its own pair of files.
+  local tag; tag="$(date +%s)-$$-$RANDOM"
+  local container_path="/etcd-data/snapshot-${tag}.db"
   info "etcd: snapshot → $dst"
   docker exec milvus-etcd etcdctl \
     --endpoints="http://127.0.0.1:${ETCD_CLIENT_PORT}" \
-    snapshot save /etcd-data/snapshot.db
-  docker cp milvus-etcd:/etcd-data/snapshot.db "$dst"
+    snapshot save "$container_path"
+  docker cp "milvus-etcd:${container_path}" "$dst"
   # Clean up via the bind mount, not `docker exec rm`: the official etcd
   # image is distroless and has no `rm` binary, so an in-container delete
   # fails with "exec: \"rm\": executable file not found in $PATH" and
   # `set -e` kills this function before `ok`/`echo "$dst"` can run.
   # /etcd-data inside the container is just ${DATA_ROOT}/etcd on the host.
-  sudo rm -f "${DATA_ROOT}/etcd/snapshot.db"
+  sudo rm -f "${DATA_ROOT}/etcd/snapshot-${tag}.db" \
+             "${DATA_ROOT}/etcd/snapshot-${tag}.db.part"
   ok "saved to $dst"
   echo "$dst"
 }

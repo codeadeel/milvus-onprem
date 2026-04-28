@@ -90,9 +90,23 @@ EOF
   cp_url="$(_jobs_cp_url)"
   token="$(_jobs_token)"
 
-  curl -fsS --max-time 10 -H "Authorization: Bearer $token" \
-    "$cp_url/jobs/$jid" \
-    | python3 -c "
+  # Capture HTTP status separately so we can give a clean error on 404
+  # instead of letting python3 -c choke on an empty body with a
+  # JSONDecodeError traceback.
+  local body http
+  body="$(mktemp)"
+  http=$(curl -sS --max-time 10 -o "$body" -w "%{http_code}" \
+    -H "Authorization: Bearer $token" "$cp_url/jobs/$jid")
+  if [[ "$http" == "404" ]]; then
+    rm -f "$body"
+    die "no such job: $jid"
+  fi
+  if [[ "$http" != "200" ]]; then
+    local err; err=$(cat "$body" 2>/dev/null | head -c 500)
+    rm -f "$body"
+    die "jobs show failed (HTTP $http): $err"
+  fi
+  cat "$body" | python3 -c "
 import json, sys, time
 d = json.load(sys.stdin)
 print(f'id:          {d[\"id\"]}')
@@ -113,6 +127,7 @@ if logs:
     for line in logs:
         print(line)
 "
+  rm -f "$body"
 }
 
 # ----- cancel ---------------------------------------------------------------

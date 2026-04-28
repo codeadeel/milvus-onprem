@@ -438,10 +438,10 @@ serve throughout. Total time: ~90s/peer.
 
 ## 7. Phase F — remove a node
 
-Permanent shrink (e.g. retiring m4):
+Permanent shrink (e.g. retiring m4 at `10.0.0.5`):
 
 ```bash
-./milvus-onprem remove-node --name=node-4
+./milvus-onprem remove-node --ip=10.0.0.5
 ```
 
 The job:
@@ -748,7 +748,7 @@ peer); upgrade is same speed.
 
 # Scale + upgrade + remove
 ./milvus-onprem upgrade --milvus-version=v2.6.12
-./milvus-onprem remove-node --name=node-4
+./milvus-onprem remove-node --ip=10.0.0.5
 
 # Jobs (long-running ops)
 ./milvus-onprem jobs list

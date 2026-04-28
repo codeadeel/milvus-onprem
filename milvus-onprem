@@ -52,7 +52,7 @@ Usage: milvus-onprem <command> [options]
                    Pass --existing to join a cluster that's already running.
 
   add-node         (legacy, pre-control-plane) Add a node via etcd member-add.
-                   For MODE=distributed, just run `join` on the new VM instead.
+                   For MODE=distributed, just run 'join' on the new VM instead.
   update-peers     (legacy) Propagate updated PEER_IPS to existing peers.
                    Auto-handled by the daemon's topology watch in distributed mode.
   remove-node      Gracefully remove a peer: drain MinIO pool, etcd
