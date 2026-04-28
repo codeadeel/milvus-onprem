@@ -67,12 +67,42 @@ common:
     ttl: 10
 
 # -----------------------------------------------------------------------------
+# Coordinator active-standby — REQUIRED for multi-mixcoord HA.
+#
+# Default upstream is false. With it disabled, when a second mixcoord
+# starts and tries to register its session at by-dev/meta/session/<coord>,
+# the etcd CompareAndSwap fails (key already held by the first mixcoord)
+# and sessionutil.Session.Register PANICS rather than going into standby.
+# In a 3-node cluster only ONE mixcoord stays alive; the other two
+# crash-loop forever via docker restart: always. Worse, when the active
+# mixcoord dies there's no warm standby to promote, so cluster
+# coordination is gone until docker happens to restart-cycle a survivor
+# into the leader slot — many seconds of coord-down.
+#
+# Setting enableActiveStandby=true on all four coords lets the loser of
+# the CAS race watch the leader's session lease and promote on TTL
+# expiry. This is the canonical Milvus 2.5 HA path. All 4 coords run
+# in the same mixcoord container so the flags must be set per-coord
+# even though they're co-resident.
+# -----------------------------------------------------------------------------
+rootCoord:
+  enableActiveStandby: true
+
+dataCoord:
+  enableActiveStandby: true
+
+# -----------------------------------------------------------------------------
 # queryCoord — tightened failure-detection so DML channels get
 # reassigned faster after a querynode dies. See docs/FAILOVER.md.
+# Plus enableActiveStandby (see rootCoord block above).
 # -----------------------------------------------------------------------------
 queryCoord:
+  enableActiveStandby: true
   checkNodeSessionInterval: 10
   heartbeatAvailableInterval: 5000
+
+indexCoord:
+  enableActiveStandby: true
 
 log:
   level: info
