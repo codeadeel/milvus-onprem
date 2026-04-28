@@ -105,8 +105,13 @@ async def run_remove_node(ctx: JobContext) -> None:
         f"{_minio_access()} {_minio_secret()}"
     )
 
-    # Pre-flight: check current status — skip start() if the pool is
-    # already decommissioned (idempotency on retry).
+    # Pre-flight: check current decommission state. Only skip the
+    # `start` call for states where issuing it would be wrong:
+    #   complete  — pool already drained, calling start would error
+    #   active    — already in progress, calling start would error
+    # All other states ("none", "missing", "failed", "canceled") mean
+    # we need to issue the start call. "failed"/"canceled" require an
+    # explicit `cancel` first to clear the previous attempt.
     pool_state = await _decommission_state(target_pool_url_fragment)
     ctx.log_writer(f"current decommission state for pool: {pool_state}")
 
@@ -115,6 +120,14 @@ async def run_remove_node(ctx: JobContext) -> None:
     elif pool_state == "active":
         ctx.log_writer("(pool decommission already in progress — skipping start)")
     else:
+        if pool_state in ("failed", "canceled"):
+            ctx.log_writer(
+                f"clearing previous {pool_state} decommission attempt"
+            )
+            await _run(
+                f"docker exec milvus-minio mc admin decommission cancel local "
+                f"'{pool_url_pattern}'"
+            )
         ctx.log_writer(f"==> mc admin decommission start pool={pool_url_pattern}")
         rc, out, err = await _run(
             f"docker exec milvus-minio mc admin decommission start local "
@@ -135,10 +148,10 @@ async def run_remove_node(ctx: JobContext) -> None:
             )
     ctx.progress_setter(0.10)
 
-    # 3. Poll status until the LEAVING POOL'S row shows "Complete".
-    #    Important: the status table includes every pool — surviving
-    #    pools always show "Active". We have to check the specific row
-    #    for our target pool, not the whole text.
+    # 3. Poll status until the LEAVING POOL reports complete.
+    #    Reads JSON via _decommission_state — the human-readable table
+    #    misleads (every pool shows "Active" by default, meaning
+    #    "online/serving", not "decommissioning in progress").
     ctx.log_writer("==> waiting for decommission to complete (poll every 5s)")
     deadline = 30 * 60
     elapsed = 0
@@ -152,11 +165,32 @@ async def run_remove_node(ctx: JobContext) -> None:
             # already removed / never existed. Treat as done.
             ctx.log_writer("(pool not in status table — assuming done)")
             break
+        if state == "failed":
+            raise RuntimeError(
+                "MinIO decommission FAILED. Inspect with "
+                "`docker exec milvus-minio mc admin decommission status local --json` "
+                "and consider `cancel` + retry once root cause is addressed."
+            )
+        if state == "canceled":
+            raise RuntimeError(
+                "MinIO decommission was CANCELLED externally. Restart the "
+                "remove-node job to reissue the start command."
+            )
+        if state == "none":
+            # Should not happen after step 2, but guards against a
+            # follower that lost its mc state (e.g. minio container
+            # restarted mid-decommission, dropping in-memory progress).
+            raise RuntimeError(
+                "MinIO reports no decommission scheduled for the target "
+                "pool. The decommission may have been silently dropped — "
+                "rerun remove-node to reissue."
+            )
+        # state == "active" — keep polling.
         if elapsed >= deadline:
             raise RuntimeError(
                 "MinIO decommission did not complete within 30 min — abort. "
                 "operator can run "
-                "`docker exec milvus-minio mc admin decommission status local` "
+                "`docker exec milvus-minio mc admin decommission status local --json` "
                 "to inspect; rerun once data movement settles."
             )
         ctx.progress_setter(min(0.6, 0.10 + (elapsed / deadline) * 0.5))
