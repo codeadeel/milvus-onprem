@@ -44,7 +44,7 @@ _render_one() {
 _render_var_list() {
   local v
   for v in CLUSTER_NAME NODE_NAME NODE_INDEX LOCAL_IP CLUSTER_SIZE \
-           PEER_IPS DATA_ROOT MINIO_DRIVES_PER_NODE MQ_TYPE \
+           PEER_IPS DATA_ROOT MINIO_DRIVES_PER_NODE MQ_TYPE MODE \
            MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_REGION \
            MILVUS_VERSION \
            MILVUS_IMAGE_TAG ETCD_IMAGE_TAG MINIO_IMAGE_TAG NGINX_IMAGE_TAG \
@@ -56,10 +56,12 @@ _render_var_list() {
            MILVUS_PORT MILVUS_HEALTHZ_PORT NGINX_LB_PORT \
            PULSAR_BROKER_PORT PULSAR_HTTP_PORT \
            ETCD_INITIAL_CLUSTER ETCD_INITIAL_CLUSTER_STATE \
-           MINIO_VOLUMES MINIO_SERVER_CMD \
+           MINIO_VOLUMES MINIO_VOLUMES_BLOCK MINIO_SERVER_CMD \
            NGINX_UPSTREAM_BLOCK \
            MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML \
-           PULSAR_HOST PULSAR_HOST_IP PULSAR_SERVICE_BLOCK; do
+           PULSAR_HOST PULSAR_HOST_IP PULSAR_SERVICE_BLOCK \
+           CLUSTER_TOKEN CONTROL_PLANE_PORT CONTROL_PLANE_IMAGE \
+           CONTROL_PLANE_SERVICE_BLOCK; do
     printf '${%s} ' "$v"
   done
 }
@@ -94,11 +96,37 @@ _render_compute_derived() {
   done
   MILVUS_ETCD_ENDPOINTS_YAML="${MILVUS_ETCD_ENDPOINTS_YAML%$'\n'}"
 
-  # MinIO server command — differs for N=1 (single-drive) vs N>=3 (distributed).
-  if (( CLUSTER_SIZE == 1 )); then
+  # MinIO server command + bind-mount block. Differs by MODE:
+  #
+  #   MODE=standalone:  one drive, command points at /data, mounted from
+  #                     ${DATA_ROOT}/minio. Single-instance MinIO.
+  #
+  #   MODE=distributed: four LOCAL drives per node, command points at
+  #                     /drive1..4, each mounted from ${DATA_ROOT}/minio/
+  #                     drive1..4. The MinIO command does NOT reference
+  #                     peer IPs — pool aggregation when peers join is
+  #                     done via `mc admin pool add` (one separate pool
+  #                     per peer), which leaves existing data in place
+  #                     and avoids the "rolling restart with new server
+  #                     list" trap that doesn't actually work.
+  #
+  # Older N>=3 inherits the standalone path on a legacy redeploy; new
+  # deploys go through MODE=distributed.
+  if [[ "${MODE:-standalone}" == "distributed" ]]; then
+    MINIO_VOLUMES_BLOCK="      - \${DATA_ROOT}/minio/drive1:/drive1
+      - \${DATA_ROOT}/minio/drive2:/drive2
+      - \${DATA_ROOT}/minio/drive3:/drive3
+      - \${DATA_ROOT}/minio/drive4:/drive4"
+    # Re-substitute DATA_ROOT inside the block we just built.
+    MINIO_VOLUMES_BLOCK="${MINIO_VOLUMES_BLOCK//\$\{DATA_ROOT\}/${DATA_ROOT}}"
+    MINIO_SERVER_CMD="server /drive1 /drive2 /drive3 /drive4 --address :${MINIO_API_PORT} --console-address :${MINIO_CONSOLE_PORT}"
+    MINIO_VOLUMES="/drive1 /drive2 /drive3 /drive4"
+  elif (( CLUSTER_SIZE == 1 )); then
+    MINIO_VOLUMES_BLOCK="      - ${DATA_ROOT}/minio:/data"
     MINIO_VOLUMES="/data"
     MINIO_SERVER_CMD="server /data --address :${MINIO_API_PORT} --console-address :${MINIO_CONSOLE_PORT}"
   else
+    MINIO_VOLUMES_BLOCK="      - ${DATA_ROOT}/minio:/data"
     MINIO_VOLUMES=""
     for ((i=0; i<CLUSTER_SIZE; i++)); do
       MINIO_VOLUMES+="http://${PEERS_ARR[$i]}:${MINIO_API_PORT}/data "
@@ -137,9 +165,21 @@ _render_compute_derived() {
     fi
   fi
 
+  # CONTROL_PLANE_SERVICE_BLOCK — same pre-render trick for the daemon
+  # container. Only included for MODE=distributed; standalone deploys
+  # don't run a daemon and would just have an unused service.
+  CONTROL_PLANE_SERVICE_BLOCK=""
+  if [[ "${MODE:-standalone}" == "distributed" ]]; then
+    local cp_fragment="$REPO_ROOT/templates/$MILVUS_VERSION/_daemon-service.yml.tpl"
+    if [[ -f "$cp_fragment" ]]; then
+      CONTROL_PLANE_SERVICE_BLOCK="$(envsubst "$(_render_var_list)" < "$cp_fragment")"
+    fi
+  fi
+
   export ETCD_INITIAL_CLUSTER ETCD_INITIAL_CLUSTER_STATE \
-         MINIO_VOLUMES MINIO_SERVER_CMD \
+         MINIO_VOLUMES MINIO_VOLUMES_BLOCK MINIO_SERVER_CMD \
          NGINX_UPSTREAM_BLOCK \
          MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML \
-         PULSAR_HOST_IP PULSAR_SERVICE_BLOCK
+         PULSAR_HOST_IP PULSAR_SERVICE_BLOCK \
+         CONTROL_PLANE_SERVICE_BLOCK
 }

@@ -11,7 +11,9 @@ Run as `python -m daemon.main` inside the container.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -20,7 +22,7 @@ from .api import router
 from .config import DaemonConfig
 from .etcd_client import EtcdClient
 from .leader import LeaderElector
-from .topology import TopologyWatcher
+from .topology import TOPOLOGY_PREFIX, TopologyWatcher
 
 
 def _setup_logging(level_name: str) -> None:
@@ -33,6 +35,39 @@ def _setup_logging(level_name: str) -> None:
 
 
 log = logging.getLogger("daemon")
+
+
+async def _register_self_if_absent(etcd: EtcdClient, config: DaemonConfig) -> None:
+    """Write this peer's topology entry on first start (idempotent).
+
+    Distributed-mode init brings the cluster up at N=1 without a leader-
+    side `/join` having registered the bootstrap peer. The daemon does it
+    here on startup so the topology key prefix is canonical from the
+    moment the first daemon comes up. For peers that joined via /join
+    later, the leader has already written their entry — `put_if_absent`
+    is a no-op.
+    """
+    key = TOPOLOGY_PREFIX + config.node_name
+    existing = await etcd.get(key)
+    if existing is not None:
+        log.info("topology entry for %s already present; not overwriting",
+                 config.node_name)
+        return
+    info = json.dumps(
+        {
+            "name": config.node_name,
+            "ip": config.local_ip,
+            "joined_at": time.time(),
+            "role": "peer",
+        }
+    )
+    written = await etcd.put_if_absent(key, info)
+    if written:
+        log.info("registered self in topology: %s -> %s",
+                 config.node_name, config.local_ip)
+    else:
+        log.info("topology entry for %s appeared concurrently; deferring",
+                 config.node_name)
 
 
 @asynccontextmanager
@@ -59,6 +94,14 @@ async def lifespan(app: FastAPI):
     app.state.etcd = etcd
     app.state.leader = elector
     app.state.topology = topology
+
+    # Idempotently register ourselves in the topology before kicking off
+    # the watcher — that way the very first observation already includes
+    # us. Failures here are non-fatal: the leader will eventually retry.
+    try:
+        await _register_self_if_absent(etcd, config)
+    except Exception as e:
+        log.warning("self-register deferred: %s (will retry on leader)", e)
 
     elector_task = asyncio.create_task(elector.run(), name="leader-elector")
     topology_task = asyncio.create_task(topology.run(), name="topology-watcher")

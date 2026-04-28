@@ -35,7 +35,7 @@ cmd_bootstrap() {
   # paths as root:root on next container start, which makes the
   # UID-1000 etcd/minio and UID-10000 pulsar containers crash with
   # AccessDenied. host_prep is idempotent — safe on a clean cluster too.
-  host_prep "$DATA_ROOT"
+  host_prep "$DATA_ROOT" "${MODE:-standalone}"
 
   # --- Stage 1: render --------------------------------------------------
   info "==> Stage 1/7: render templates"
@@ -99,6 +99,19 @@ cmd_bootstrap() {
   info "==> Stage 5/7: start nginx LB"
   dc up -d nginx
 
+  # --- Stage 5a: control-plane daemon (distributed mode only) -----------
+  # The daemon container is included in the rendered compose only when
+  # MODE=distributed. It depends on etcd (already up) and runs the
+  # leader election + topology watch + HTTP API. Standalone deploys
+  # don't have a daemon at all, so this stage is a no-op for them.
+  if [[ "${MODE:-standalone}" == "distributed" ]]; then
+    info "==> Stage 5a/7: start control-plane daemon"
+    dc up -d control-plane
+    _wait_for "control-plane @127.0.0.1:${CONTROL_PLANE_PORT:-19500}" 60 \
+      _control_plane_local_health \
+      || warn "control plane not healthy yet — \`docker logs milvus-onprem-cp\` for details"
+  fi
+
   # --- Stage 6: convergence ---------------------------------------------
   if role_is_standalone; then
     info "==> Stage 6/7: standalone — skipping cluster-wide convergence wait"
@@ -121,6 +134,12 @@ cmd_bootstrap() {
   ok "bootstrap complete on $NODE_NAME"
   info "verify with: milvus-onprem status"
   info "exercise with: milvus-onprem smoke   (once tests/ phase is in place)"
+}
+
+# Probe the local control-plane daemon's /health endpoint. Used by the
+# Stage 5a wait-loop to confirm the daemon came up cleanly.
+_control_plane_local_health() {
+  curl -fsS -m 2 "http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}/health" >/dev/null
 }
 
 # Wait up to <secs> seconds for <fn> to return 0. Prints OK/FAIL.

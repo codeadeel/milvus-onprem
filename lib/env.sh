@@ -37,6 +37,11 @@ env_require() {
   [[ -n "${PEER_IPS:-}" ]]        || die "PEER_IPS not set in cluster.env"
   [[ -n "${CLUSTER_NAME:-}" ]]    || die "CLUSTER_NAME not set in cluster.env"
   [[ -n "${MINIO_SECRET_KEY:-}" ]] || die "MINIO_SECRET_KEY not set in cluster.env"
+  # CLUSTER_TOKEN is required only in distributed mode — the daemon uses
+  # it as the shared bearer-token. Standalone deploys don't run a daemon.
+  if [[ "${MODE:-standalone}" == "distributed" && -z "${CLUSTER_TOKEN:-}" ]]; then
+    die "CLUSTER_TOKEN not set in cluster.env (required for MODE=distributed)"
+  fi
   _env_validate_milvus_version
   _env_validate_mq_type
   _env_validate_topology
@@ -53,7 +58,23 @@ _env_apply_defaults() {
   : "${MINIO_ACCESS_KEY:=minioadmin}"
   : "${MINIO_REGION:=us-east-1}"
   : "${DATA_ROOT:=/data}"
-  : "${MINIO_DRIVES_PER_NODE:=1}"
+  # MODE selects the deploy shape:
+  #   standalone   — single-VM, single-instance services, no daemon
+  #   distributed  — HA-ready: cluster-mode services from N=1, control-plane
+  #                  daemon, MinIO with 4 drives per node ready to grow
+  : "${MODE:=standalone}"
+  # Per-mode default drive count on each node's MinIO. Distributed needs >=4
+  # to satisfy MinIO's distributed-mode minimum even at N=1; standalone
+  # stays at 1 drive (single-instance MinIO).
+  if [[ "$MODE" == "distributed" ]]; then
+    : "${MINIO_DRIVES_PER_NODE:=4}"
+  else
+    : "${MINIO_DRIVES_PER_NODE:=1}"
+  fi
+  # Control-plane daemon listen port (FastAPI + leader election).
+  : "${CONTROL_PLANE_PORT:=19500}"
+  # Container image for the daemon. Built locally on each node by `init`.
+  : "${CONTROL_PLANE_IMAGE:=milvus-onprem-cp:dev}"
   # MQ_TYPE default is version-dependent — set after _env_derive_milvus_version.
 
   : "${MILVUS_IMAGE_TAG:=v2.6.11}"
