@@ -25,6 +25,7 @@ venv/
 .env.*
 !.env.example
 cluster.env
+cluster.env.bak
 !cluster.env.example
 *.key
 *.pem
