@@ -1,10 +1,11 @@
 # milvus-onprem
 
-**High-availability Milvus 2.6 across N Linux VMs — no Kubernetes required.**
+**High-availability Milvus 2.5 / 2.6 across N Linux VMs — no Kubernetes required.**
 
-> Status: **alpha**. The CLI is feature-complete for v0 but hasn't been
-> verified end-to-end on real multi-VM hardware yet. PRs and bug reports
-> welcome.
+> **Status: v1.2** — hardware-validated end-to-end on a 4-VM cluster
+> for both Milvus 2.6.11 and 2.5.4 (smoke + tutorial + replication-proof
+> + backup pipeline + scale-out + watchdog + failover drills). See
+> [docs/TUTORIAL.md](docs/TUTORIAL.md) for the walked-through guide.
 
 ## The problem
 
@@ -27,17 +28,20 @@ flowchart LR
   C[pymilvus client]
 
   subgraph node1["node-1"]
-    N1[nginx :19537] --> M1[Milvus + WAL]
+    N1[nginx :19537] --> M1[Milvus]
+    D1[control-plane :19500]
     M1 --> E1[(etcd)]
     M1 --> S1[(MinIO drive)]
   end
   subgraph node2["node-2"]
-    N2[nginx :19537] --> M2[Milvus + WAL]
+    N2[nginx :19537] --> M2[Milvus]
+    D2[control-plane :19500]
     M2 --> E2[(etcd)]
     M2 --> S2[(MinIO drive)]
   end
   subgraph nodeN["node-N"]
-    NN[nginx :19537] --> MN[Milvus + WAL]
+    NN[nginx :19537] --> MN[Milvus]
+    DN[control-plane :19500]
     MN --> EN[(etcd)]
     MN --> SN[(MinIO drive)]
   end
@@ -52,33 +56,37 @@ flowchart LR
   S1 <-.->|erasure coding| S2
   S2 <-.->|erasure coding| SN
   S1 <-.->|erasure coding| SN
+  D1 <-->|leader election| D2
+  D2 <-->|leader election| DN
+  D1 <-->|leader election| DN
 ```
 
-A CLI plus modular bash that deploys a redundant Milvus 2.6 cluster
-across plain Linux VMs (3, 5, 7, …). Components per node:
+A CLI plus modular bash plus a small Python control-plane daemon that
+deploys a redundant Milvus 2.5 / 2.6 cluster across plain Linux VMs
+(1, 3, 5, 7, 9). Components per node (2.6 path):
 
 - **etcd** — joins an N-node Raft cluster. Tolerates `(N-1)/2` failures.
 - **MinIO** — distributed mode, erasure-coded across all peers.
 - **Milvus 2.6** with embedded **Woodpecker** WAL. No separate Pulsar /
   Kafka cluster.
 - **nginx** — TCP load balancer in front of all peer Milvus instances.
+- **control-plane daemon** — leader-elected (etcd lease), owns
+  `/join`, jobs (backup / restore / upgrade / remove-node), watchdog
+  (auto-restart unhealthy local containers, alert on peer-down),
+  topology fan-out (auto re-render + nginx reload + rolling MinIO).
 
-Single binary CLI: `milvus-onprem`. Run `init` once per node, `bootstrap`
-to deploy, `pair`/`join` to distribute config across N peers in one step.
+(Milvus 2.5 adds 4 more milvus-* containers per node and a Pulsar
+broker on PULSAR_HOST — see [templates/2.5/README.md](templates/2.5/README.md).)
 
-## Quick start (3 nodes)
-
-The deploy lifecycle:
+## Quick start (3-node HA, Milvus 2.6)
 
 ```mermaid
 flowchart LR
-  A[clone repo<br/>on every node] --> B[node-1: <code>init</code>]
-  B --> C[node-1: <code>pair</code><br/>prints token]
-  C --> D[node-2: <code>join</code> · token]
-  C --> E[node-N: <code>join</code> · token]
-  D --> F[node-1: <code>bootstrap</code>]
-  E --> F
-  F --> G[<code>status</code> · all green]
+  A[clone repo<br/>on every node] --> B[node-1: <code>init --mode=distributed</code>]
+  B --> C[node-2: <code>join · token</code>]
+  B --> D[node-3: <code>join · token</code>]
+  C --> E[<code>status · all green</code>]
+  D --> E
 ```
 
 ```bash
@@ -87,21 +95,24 @@ git clone https://github.com/codeadeel/milvus-onprem.git ~/milvus-onprem
 cd ~/milvus-onprem
 
 # on node-1 (the bootstrap node):
-./milvus-onprem init --peer-ips=10.0.0.10,10.0.0.11,10.0.0.12
-./milvus-onprem pair          # prints a token; keeps running
-# copy the printed `./milvus-onprem join ...` line
+./milvus-onprem init --mode=distributed --milvus-version=v2.6.11
+# prints CLUSTER_TOKEN; copy the `./milvus-onprem join …` line it shows
 
 # on each other node:
-./milvus-onprem join 10.0.0.10:19500 <TOKEN>
-# auto-fetches cluster.env, runs init + bootstrap
+./milvus-onprem join 10.0.0.10:19500 <CLUSTER_TOKEN>
+# fetches cluster.env from the leader, runs bootstrap with state=existing
 
-# back on node-1, after pair has exited (after all peers fetched):
-./milvus-onprem bootstrap     # render + up + bucket create
+# verify (from any node):
 ./milvus-onprem status        # all green = ready
+./milvus-onprem smoke         # 1000-row functional test
 ```
 
 That's a working 3-node Milvus cluster. Clients connect to any node's
 `:19537`.
+
+**Want a fourth node later?** Run the same `join` on m4. The daemon
+handles etcd member-add, topology fan-out, rolling MinIO recreate,
+and nginx reload automatically — no `add-node`, no `update-peers`.
 
 Optional — drop the CLI on PATH so you can call it from any directory:
 
@@ -111,7 +122,9 @@ Optional — drop the CLI on PATH so you can call it from any directory:
 ./milvus-onprem install --prefix=$HOME/.local/bin --completion-dir=$HOME/.bash_completion.d
 ```
 
-For the full walkthrough with diagrams, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+For the **full walkthrough with hardware-validated outputs**, see
+[docs/TUTORIAL.md](docs/TUTORIAL.md). For deeper deploy topology
+notes, [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## What you get
 
@@ -198,22 +211,46 @@ nodes can `nc -zv <peer-ip> 2379` each other, you're good.
 
 | Doc | Read this when |
 |---|---|
+| [docs/TUTORIAL.md](docs/TUTORIAL.md) | **Start here.** Hardware-validated walkthrough of every shipped feature on a real 4-VM cluster. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | You want to understand how the components fit together. |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | First-time deploy. Step-by-step with diagrams. |
-| [docs/CONFIG.md](docs/CONFIG.md) | `cluster.env` reference — every variable, every default. |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-2: status, smoke, backup, restore, scale-out. |
-| [docs/FAILOVER.md](docs/FAILOVER.md) | What happens when a node dies — 2.5 vs 2.6 behavior, retry pattern, recovery tunings. |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → fix table. Things people have actually hit, including permanently-lost-node recovery. |
-| [test/tutorial/README.md](test/tutorial/README.md) | 10-step pymilvus walkthrough for the dev team. |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | First-time deploy reference. Step-by-step with diagrams. |
+| [docs/CONFIG.md](docs/CONFIG.md) | `cluster.env` reference — every variable, every default (incl. watchdog tuning + retention). |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-2: status, smoke, backup, restore, scale-out, alert formats. |
+| [docs/FAILOVER.md](docs/FAILOVER.md) | What happens when a node dies — 2.5 vs 2.6 behavior, retry pattern, recovery tunings, watchdog flow, 2.5 mixcoord active-standby. |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → fix table. Permanently-lost-node recovery, COMPONENT_RESTART_LOOP triage, 2.5 mixcoord panic. |
+| [docs/CONTROL_PLANE.md](docs/CONTROL_PLANE.md) | Internals of the daemon: leader election, jobs, watchdog, design rationale. |
+| [docs/PULSAR_HA.md](docs/PULSAR_HA.md) | Design for in-cluster Pulsar HA on 2.5 (not yet implemented). |
+| [daemon/README.md](daemon/README.md) | Per-file walkthrough of the Python daemon. |
+| [test/tutorial/README.md](test/tutorial/README.md) | 10-step pymilvus walkthrough for app developers. |
 | [templates/2.5/README.md](templates/2.5/README.md) · [templates/2.6/README.md](templates/2.6/README.md) | Per-version topology notes. |
 
 ## Versioning
 
-- Milvus version is selected via `MILVUS_IMAGE_TAG` in cluster.env.
+- Milvus version is selected via `MILVUS_IMAGE_TAG` in cluster.env
+  (or `--milvus-version=…` on `init`).
 - The CLI auto-routes to `templates/<major.minor>/` based on that tag.
-- Currently shipping templates: **2.6**.
-- Adding 2.5 (or future 2.7+) means contributing three template files
-  in a new `templates/X.Y/` directory — no engine changes needed.
+- Currently shipping templates: **2.6** (recommended, simplest topology)
+  and **2.5** (per-component containers + Pulsar singleton; HA-Pulsar
+  is design-doc only — see [docs/PULSAR_HA.md](docs/PULSAR_HA.md)).
+- Adding a future 2.7+ means contributing template files in a new
+  `templates/X.Y/` directory — no engine changes needed.
+
+## Validation status
+
+| Path | Status |
+|---|---|
+| 2.6 N=3 / N=4 — bootstrap, smoke, tutorial 02–10, replication-proof | ✅ |
+| 2.5 N=3 / N=4 — bootstrap, smoke, tutorial 02–10, replication-proof | ✅ |
+| Online add-node (3→4 with rolling MinIO recreate) | ✅ ~93s, sequenced 30s/peer |
+| Online remove-node (4→3, 2.5 + 2.6) | ✅ |
+| Rolling Milvus version upgrade (2.5 + 2.6) | ✅ |
+| Backup pipeline (etcd snapshot + create + export + restore-with-rename + load) | ✅ |
+| Cross-version restore (2.5 backup → 2.6 cluster) | ✅ |
+| Watchdog: COMPONENT_RESTART × N → COMPONENT_RESTART_LOOP back-off | ✅ |
+| Watchdog: PEER_DOWN_ALERT / PEER_UP_ALERT | ✅ |
+| 2.5 mixcoord active-standby failover (`enableActiveStandby: true`) | ✅ <500ms promotion |
+| 2.6 single-node failover with active query loop | ✅ 0 errors during outage |
+| Permanently-lost-node recovery (etcd member-remove + replace) | ✅ |
 
 ## License
 
