@@ -47,12 +47,16 @@ CLUSTER_ENV_PATH = Path("/etc/milvus-onprem/cluster.env")
 _join_lock = asyncio.Lock()
 
 # Keys we strip from the leader's cluster.env when copying values to a
-# joiner — these are per-peer values that we re-set explicitly.
+# joiner — these are per-peer values that we re-set explicitly. The
+# joiner's cmd_join.sh sets HOST_REPO_ROOT to its own host path; the
+# leader's value would be wrong (or accidentally identical, which is
+# brittle to depend on).
 _PER_PEER_KEYS = frozenset({
     "PEER_IPS",
     "NODE_NAME",
     "LOCAL_IP",
     "ETCD_INITIAL_CLUSTER_STATE",
+    "HOST_REPO_ROOT",
 })
 
 

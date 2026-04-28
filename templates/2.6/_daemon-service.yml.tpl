@@ -20,11 +20,11 @@
     volumes:
       # /join reads cluster.env to build a copy for the joining peer.
       # Read-only — the daemon never edits cluster.env directly.
-      - ${REPO_ROOT}/cluster.env:/etc/milvus-onprem/cluster.env:ro
+      - ${HOST_REPO_ROOT}/cluster.env:/etc/milvus-onprem/cluster.env:ro
       # The repo itself, used by the topology-change handler to call
       # `./milvus-onprem render` and rewrite rendered/<node-name>/.
       # The render needs to write rendered/, so this is read-write.
-      - ${REPO_ROOT}:/repo
+      - ${HOST_REPO_ROOT}:/repo
       # Docker socket so the daemon can `docker exec` into sibling
       # containers (nginx reload, MinIO mc admin pool add). Without
       # this the host-side propagation can't run from inside the

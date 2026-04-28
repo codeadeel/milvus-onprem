@@ -87,6 +87,11 @@ cmd_join() {
   printf '%s' "$cluster_env_body" > "$CLUSTER_ENV"
   chmod 600 "$CLUSTER_ENV"
 
+  # The leader doesn't (and shouldn't) know the joiner's host repo
+  # path. We set it here so the daemon's bind mounts resolve to a
+  # real host path on this peer, not the in-container /repo.
+  env_upsert_kv HOST_REPO_ROOT "$REPO_ROOT"
+
   # Sanity-check the file before relying on it.
   grep -q "^PEER_IPS=" "$CLUSTER_ENV" \
     || die "fetched cluster.env doesn't look right (missing PEER_IPS)"
