@@ -61,6 +61,34 @@ deploy 2.5 N=4 + drill the same matrix plus 2.5-specific paths.
 |---|---|
 | "`docker kill` should fire `restart: always`" | False. Docker docs and observed behavior confirm: user-initiated stops/kills do NOT trigger `restart: always`. The policy fires only on unexpected exits (process crash inside container). |
 
+## Round 3 — scale + concurrency + watchdog edges
+
+Pushed harder still. Drilled on the live 2.5 N=4 (then N=3 after a
+remove). Scope: 100K-row scale, watchdog multi-container loop-guard
+behavior, concurrent backup + remove-node, upgrade-mid-failure.
+
+### What works (validated this round)
+
+| Area | Result |
+|---|---|
+| Watchdog multi-container tracking | 3 simultaneous `milvus-wd[123]` containers all unhealthy → independent COMPONENT_RESTART counters per name, independent COMPONENT_RESTART_LOOP fires (3 LOOPs at near-identical timestamps for 3 distinct containers). |
+| Concurrent `create-backup` + `remove-node` | Both submitted in parallel, both completed cleanly. backup=1.98s, remove-node=5.67s. Cluster ended green at N=3. No corruption / race observed at the daemon-job level. |
+| Same-version "upgrade" (rolling restart mechanics) | `upgrade --milvus-version=v2.5.4` against an already-2.5.4 cluster runs a clean rolling-restart of the per-component containers on each peer, in node-N order. ~25s/peer. |
+
+### New findings — Round 3
+
+| ID | Severity | Symptom |
+|---|---|---|
+| F-R3-A.1 | **bug (Pulsar SPOF)** | 100K-row insert in 10×10K batches → `num_entities=83373` after final flush. **17K rows lost.** Pulsar's BookKeeper bookie stalled mid-ingest (28-second BK ops, "Forcing connection to close since cannot send a pong message"); milvus's MQ consumer dropped pending messages. This is a known consequence of the singleton Pulsar SPOF on 2.5 — documented in `templates/2.5/README.md` and `docs/PULSAR_HA.md` as a write-availability concern, but the actual failure mode (silent partial data loss on bulk ingest, no exception raised) is worse than just "writes block when pulsar is down". Mitigations: (a) smaller batches (≤1K rows/batch) so MQ keeps up; (b) HA Pulsar (per docs/PULSAR_HA.md, design-only); (c) use 2.6 (Woodpecker eliminates the Pulsar dependency). |
+| F-R3-B.1 | **bug** | `COMPONENT_RESTART_LOOP` was a sliding-window rate-limit, not a halt. Documented design (per `daemon/watchdog.py` class docstring) is "stops the auto-restart and emits COMPONENT_RESTART_LOOP — let the operator inspect rather than amplify a misconfigured restart pile." Actual: after the 5-min window aged out, the watchdog resumed restarts and re-fired LOOP. Drilled live: in ~13min, `milvus-wd[123]` accumulated **10 LOOP fires** across the 3 containers and never stopped retrying. **Fixed**: once `_loop_alerted` is set for a container, no more restarts. The flag clears only when the container reaches `health=healthy` (giving operators a clean re-arm path: fix the issue, restart the container manually, watchdog re-engages once healthy). |
+| F-R3-D.1 | (not-a-bug) | Tried to drill upgrade-abort by killing m2's mixcoord mid-rolling-upgrade. The drill window was too narrow (small data → fast recreates) and the kill didn't land during a critical step; upgrade completed successfully. Logic-level review of `daemon/workers/version_upgrade.py` confirms abort-on-failure path exists (`raise RuntimeError(f"{peer_ip} upgrade failed: {body_json['error']}")` propagates to the job runner). Functional drill of an actual mid-upgrade abort needs a longer-running upgrade or fault injection at the `/upgrade-self` HTTP layer. Not blocking. |
+
+### Round 3 fix shipped
+
+| Finding | Fix | Validation |
+|---|---|---|
+| F-R3-B.1 loop-guard not actually halting | `daemon/watchdog.py` — once `_loop_alerted.add(name)` runs, `_maybe_restart` returns immediately without re-checking the sliding window. Flag is cleared only when the container observes `health=healthy` in `_tick`, giving the operator a clean re-arm path: fix the underlying issue, run `docker restart <name>`, watchdog sees healthy → flag clears → auto-restart re-armed for any future re-trip. | Re-drilled with the fix; only ONE LOOP fires per container per "incident", restarts genuinely halt until operator-triggered recovery. |
+
 ## Known limitations (not fixed in this pass)
 
 | ID | What it is | Why deferred |

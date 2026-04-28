@@ -125,34 +125,72 @@ class LocalComponentWatchdog:
                 ):
                     await self._maybe_restart(name)
             else:
-                # Healthy or no-healthcheck-defined — reset counter.
+                # Healthy or no-healthcheck-defined — reset counter, AND
+                # clear the loop-alerted flag so a subsequent re-trip
+                # (e.g. operator fixed the bug, container went healthy,
+                # then later degrades from a different cause) gets a
+                # fresh round of auto-restart attempts.
                 self._consecutive_unhealthy[name] = 0
+                if health == "healthy" and name in self._loop_alerted:
+                    log.info(
+                        "watchdog: %s recovered to healthy; clearing "
+                        "loop-alerted flag — auto-restart re-armed",
+                        name,
+                    )
+                    self._loop_alerted.discard(name)
+                    self._restart_history[name].clear()
 
         # Drop counters for containers that are gone (e.g. removed).
         for name in list(self._consecutive_unhealthy):
             if name not in seen:
                 self._consecutive_unhealthy.pop(name, None)
+        # Clear loop-alerted entries for removed containers so a new
+        # container with the same name doesn't inherit a stale flag.
+        for name in list(self._loop_alerted):
+            if name not in seen:
+                self._loop_alerted.discard(name)
+                self._restart_history.pop(name, None)
 
     async def _maybe_restart(self, name: str) -> None:
         """Restart `name` if mode allows and the loop-guard hasn't
         tripped. Resets the unhealthy counter on success."""
+        # Once a container has tripped the loop guard, do NOT restart
+        # again — even if its 5-min sliding window of restart timestamps
+        # has aged out. Documented design intent (per the docstring on
+        # this class) is "leave alone for operator" once 3 restarts in
+        # 5min have happened. Prior behavior was a sliding-window rate-
+        # limit: after 5min of inactivity the oldest restart aged out,
+        # `len(history)` dropped below `restart_loop_max`, and the
+        # watchdog resumed restarts — which contradicts the documented
+        # promise and creates indefinite background load on a sticky-
+        # unhealthy container. The flag clears only when the container
+        # reaches `health=healthy` (see _tick: healthy → reset counter
+        # and discard the flag).
+        if name in self._loop_alerted:
+            log.warning(
+                "watchdog: %s in restart loop — leaving alone for operator "
+                "(`docker restart %s` to reset once underlying issue is fixed)",
+                name, name,
+            )
+            return
+
         history = self._restart_history[name]
         cutoff = time.time() - self._cfg.watchdog_restart_loop_window_s
         while history and history[0] < cutoff:
             history.popleft()
 
         if len(history) >= self._cfg.watchdog_restart_loop_max:
-            if name not in self._loop_alerted:
-                _emit(
-                    f"COMPONENT_RESTART_LOOP ts={_now()} container={name} "
-                    f"restarts_in_5m={len(history)}"
-                )
-                self._loop_alerted.add(name)
+            _emit(
+                f"COMPONENT_RESTART_LOOP ts={_now()} container={name} "
+                f"restarts_in_5m={len(history)}"
+            )
+            self._loop_alerted.add(name)
             log.warning(
-                "watchdog: %s in restart loop (%d restarts in window) — "
-                "leaving alone for operator",
+                "watchdog: %s in restart loop (%d restarts in %ds) — "
+                "halting auto-restart for this container",
                 name,
                 len(history),
+                self._cfg.watchdog_restart_loop_window_s,
             )
             return
 
@@ -182,9 +220,6 @@ class LocalComponentWatchdog:
 
         history.append(time.time())
         self._consecutive_unhealthy[name] = 0
-        # Out of the loop alert if it later recovers — caller resets
-        # via re-trip detection.
-        self._loop_alerted.discard(name)
 
 
 class PeerReachabilityWatchdog:
