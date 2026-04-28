@@ -97,10 +97,12 @@ etcd. So `templates/2.5/` deploys the components separately:
 - `datanode` — ingest worker.
 - `indexnode` — index-build worker.
 
-Plus a Pulsar broker on PULSAR_HOST (singleton; see Pulsar section
-below). Net per-node container count: 8 on regular peers, 9 on
-PULSAR_HOST. Higher than 2.6's 4-per-node, but it's the topology 2.5
-was designed for.
+Plus a Pulsar broker on PULSAR_HOST (singleton; SPOF for writes —
+see [docs/PULSAR_HA.md](PULSAR_HA.md) for the in-cluster HA design,
+not yet implemented). Net per-node container count: 9 on regular
+peers, 10 on PULSAR_HOST (counts include the control-plane daemon).
+Higher than 2.6's 4-per-node, but it's the topology 2.5 was designed
+for.
 
 ### etcd (consensus store)
 

@@ -108,10 +108,17 @@ Consequences:
 
 If you can accept this trade-off (e.g. dev / staging, batch-only ingest
 workloads, write outage tolerable), this is fine. If you need true HA on
-2.5, the right answer is to **point at an external Pulsar cluster** — set
-`PULSAR_HOST=<external-pulsar-ip>` and remove the local Pulsar service
-from your compose. (Or, as the project lead recommends: use Milvus 2.6 +
-Woodpecker, where this whole problem disappears.)
+2.5, your options are:
+
+1. **Use Milvus 2.6 + Woodpecker** — no Pulsar at all. Recommended.
+2. **Point at an external Pulsar cluster** — set
+   `PULSAR_HOST=<external-pulsar-ip>` and remove the local Pulsar
+   service from your compose. Right answer if you already have a
+   Pulsar SRE team; operationally cleanest.
+3. **Run Pulsar HA in-cluster** — design + scaffolding live in
+   [`docs/PULSAR_HA.md`](../../docs/PULSAR_HA.md). Adds 9 containers
+   (3 ZK + 3 BK + 3 broker) to a 3-node cluster. *Not yet
+   implemented* — design-doc only at this point.
 
 ## Files
 
