@@ -6,8 +6,9 @@ exported backup tree (or one already in MinIO) into the live cluster.
 Params (passed through to the bash CLI):
   from               filesystem path of an exported backup tree
   name               backup name in MinIO (alternative to --from)
-  rename_from        optional — restore as a different collection name
-  rename_to          optional — paired with rename_from
+  rename             optional — comma-separated pairs A:B[,C:D,...]
+                     to restore collection A as B (matches the bash
+                     CLI's `--rename` flag shape exactly).
   no_restore_index   optional bool
   drop_existing      optional bool
   load               optional bool — load collection after restore
@@ -30,14 +31,19 @@ async def run_restore_backup(ctx: JobContext) -> None:
         raise ValueError("restore-backup requires either 'from' or 'name'")
 
     args = ["./milvus-onprem", "restore-backup"]
-    if (v := p.get("from")):
-        args.append(f"--from={v}")
+    has_from = bool(p.get("from"))
+    if has_from:
+        args.append(f"--from={p['from']}")
     if (v := p.get("name")):
         args.append(f"--name={v}")
-    if (v := p.get("rename_from")):
-        args.append(f"--rename-from={v}")
-    if (v := p.get("rename_to")):
-        args.append(f"--rename-to={v}")
+    # `name` without `from` means the backup is already in MinIO (e.g.
+    # the operator just ran create-backup, so they know the name).
+    # The bash CLI requires --skip-upload to acknowledge that path
+    # explicitly; add it on the operator's behalf in this branch.
+    if p.get("name") and not has_from:
+        args.append("--skip-upload")
+    if (v := p.get("rename")):
+        args.append(f"--rename={v}")
     if p.get("no_restore_index"):
         args.append("--no-restore-index")
     if p.get("drop_existing"):

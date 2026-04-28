@@ -65,7 +65,7 @@ cmd_restore_backup() {
         && "${MILVUS_ONPREM_INTERNAL:-}" != "1" ]]; then
     _restore_backup_via_daemon \
       "$from_path" "$name" "$skip_upload" "$restore_index" \
-      "$drop_existing" "$auto_load"
+      "$drop_existing" "$auto_load" "$rename_pairs"
     return $?
   fi
 
@@ -282,7 +282,7 @@ EOF
 # Maps the bash flags onto the worker's params dict.
 _restore_backup_via_daemon() {
   local from_path="$1" name="$2" skip_upload="$3" restore_index="$4"
-  local drop_existing="$5" auto_load="$6"
+  local drop_existing="$5" auto_load="$6" rename_pairs="${7:-}"
   local cp_url="http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}"
   local token="${CLUSTER_TOKEN:-}"
   [[ -n "$token" ]] || die "CLUSTER_TOKEN missing in cluster.env"
@@ -291,8 +291,9 @@ _restore_backup_via_daemon() {
   body=$(python3 -c "
 import json
 p = {}
-if '''$from_path''': p['from'] = '''$from_path'''
-if '''$name''':      p['name'] = '''$name'''
+if '''$from_path''':    p['from']   = '''$from_path'''
+if '''$name''':         p['name']   = '''$name'''
+if '''$rename_pairs''': p['rename'] = '''$rename_pairs'''
 if int('''$skip_upload''' or '0'):  p['name'] = p.get('name')  # no-op flag carried in 'name' alone
 if int('''$drop_existing''' or '0'): p['drop_existing'] = True
 if int('''$auto_load''' or '0'):     p['load']           = True
