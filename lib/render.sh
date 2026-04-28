@@ -102,14 +102,19 @@ _render_compute_derived() {
   #   MODE=standalone:  one drive, command points at /data, mounted from
   #                     ${DATA_ROOT}/minio. Single-instance MinIO.
   #
-  #   MODE=distributed: four LOCAL drives per node, command points at
-  #                     /drive1..4, each mounted from ${DATA_ROOT}/minio/
-  #                     drive1..4. The MinIO command does NOT reference
-  #                     peer IPs — pool aggregation when peers join is
-  #                     done via `mc admin pool add` (one separate pool
-  #                     per peer), which leaves existing data in place
-  #                     and avoids the "rolling restart with new server
-  #                     list" trap that doesn't actually work.
+  #   MODE=distributed: each peer contributes 4 drives to a SHARED
+  #                     distributed pool. Server command lists every
+  #                     peer's drives:
+  #
+  #                       server http://m1:9000/drive1..4 \\
+  #                              http://m2:9000/drive1..4 ...
+  #
+  #                     At N=1 the command is just this peer's 4 URLs —
+  #                     MinIO runs as a distributed-mode-of-1 with 4
+  #                     drives, ready to scale. When peers join, every
+  #                     peer's MINIO_VOLUMES grows to include the new
+  #                     drives, and each MinIO is recreated to pick
+  #                     up the new pool list (cf. handlers.py).
   #
   # Older N>=3 inherits the standalone path on a legacy redeploy; new
   # deploys go through MODE=distributed.
@@ -118,10 +123,18 @@ _render_compute_derived() {
       - \${DATA_ROOT}/minio/drive2:/drive2
       - \${DATA_ROOT}/minio/drive3:/drive3
       - \${DATA_ROOT}/minio/drive4:/drive4"
-    # Re-substitute DATA_ROOT inside the block we just built.
     MINIO_VOLUMES_BLOCK="${MINIO_VOLUMES_BLOCK//\$\{DATA_ROOT\}/${DATA_ROOT}}"
-    MINIO_SERVER_CMD="server /drive1 /drive2 /drive3 /drive4 --address :${MINIO_API_PORT} --console-address :${MINIO_CONSOLE_PORT}"
-    MINIO_VOLUMES="/drive1 /drive2 /drive3 /drive4"
+
+    MINIO_VOLUMES=""
+    for ((i=0; i<CLUSTER_SIZE; i++)); do
+      local ip="${PEERS_ARR[$i]}"
+      MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive1 "
+      MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive2 "
+      MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive3 "
+      MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive4 "
+    done
+    MINIO_VOLUMES="${MINIO_VOLUMES% }"
+    MINIO_SERVER_CMD="server ${MINIO_VOLUMES} --address :${MINIO_API_PORT} --console-address :${MINIO_CONSOLE_PORT}"
   elif (( CLUSTER_SIZE == 1 )); then
     MINIO_VOLUMES_BLOCK="      - ${DATA_ROOT}/minio:/data"
     MINIO_VOLUMES="/data"

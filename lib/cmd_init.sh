@@ -164,13 +164,16 @@ _init_detect_local_ip() {
   printf '%s' "$ip"
 }
 
-# Generate a secret of the given length (default 18 bytes -> 24 base64 chars).
+# Generate a secret of the given length (default 18 bytes -> 36 hex chars).
+# Hex output keeps the secret leading-dash-free, which matters for
+# downstream tools (mc CLI, curl headers, etc.) that parse a leading `-`
+# as a flag. Hex also avoids `=` / `+` / `/` from base64.
 _gen_secret_key() {
   local bytes="${1:-18}"
   if command -v openssl >/dev/null 2>&1; then
-    openssl rand -base64 "$bytes" | tr -d '=' | tr '/+' '_-'
+    openssl rand -hex "$bytes"
   else
-    head -c "$bytes" /dev/urandom | base64 | tr -d '=' | tr '/+' '_-'
+    head -c "$bytes" /dev/urandom | od -An -vtx1 | tr -d ' \n'
   fi
 }
 

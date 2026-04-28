@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from .api import router
 from .config import DaemonConfig
 from .etcd_client import EtcdClient
+from .handlers import TopologyHandlers
 from .leader import LeaderElector
 from .topology import TOPOLOGY_PREFIX, TopologyWatcher
 
@@ -89,11 +90,21 @@ async def lifespan(app: FastAPI):
     elector = LeaderElector(etcd, config)
     topology = TopologyWatcher(etcd)
 
+    # Side-effect bundle for topology changes — re-render, nginx
+    # reload, MinIO recreate. Registered before the watcher starts so
+    # we don't miss any events. Reads peers from the watcher's mirror
+    # rather than etcd, so it works during a 1->2 grow's quorum dip.
+    handlers = TopologyHandlers(
+        config=config, leader=elector, etcd=etcd, topology=topology
+    )
+    topology.on_change(handlers)
+
     # Stash on app.state so route handlers can read them.
     app.state.config = config
     app.state.etcd = etcd
     app.state.leader = elector
     app.state.topology = topology
+    app.state.handlers = handlers
 
     # Idempotently register ourselves in the topology before kicking off
     # the watcher — that way the very first observation already includes
