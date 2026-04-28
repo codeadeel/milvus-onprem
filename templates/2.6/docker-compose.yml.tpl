@@ -72,7 +72,7 @@ ${MINIO_VOLUMES_BLOCK}
     command: ["milvus", "run", "standalone"]
     volumes:
       - ${DATA_ROOT}/milvus:/var/lib/milvus
-      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+      - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - etcd
       - minio
@@ -91,7 +91,7 @@ ${MINIO_VOLUMES_BLOCK}
     network_mode: host
     restart: always
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - milvus
 

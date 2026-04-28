@@ -100,7 +100,7 @@ ${PULSAR_SERVICE_BLOCK}
       - -indexcoord=true
     volumes:
       - ${DATA_ROOT}/milvus:/var/lib/milvus
-      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+      - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - etcd
       - minio
@@ -114,7 +114,7 @@ ${PULSAR_SERVICE_BLOCK}
     command: ["milvus", "run", "proxy"]
     volumes:
       - ${DATA_ROOT}/milvus:/var/lib/milvus
-      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+      - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - mixcoord
 
@@ -127,7 +127,7 @@ ${PULSAR_SERVICE_BLOCK}
     command: ["milvus", "run", "querynode"]
     volumes:
       - ${DATA_ROOT}/milvus:/var/lib/milvus
-      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+      - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - mixcoord
 
@@ -140,7 +140,7 @@ ${PULSAR_SERVICE_BLOCK}
     command: ["milvus", "run", "datanode"]
     volumes:
       - ${DATA_ROOT}/milvus:/var/lib/milvus
-      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+      - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - mixcoord
 
@@ -153,7 +153,7 @@ ${PULSAR_SERVICE_BLOCK}
     command: ["milvus", "run", "indexnode"]
     volumes:
       - ${DATA_ROOT}/milvus:/var/lib/milvus
-      - ./milvus.yaml:/milvus/configs/user.yaml:ro
+      - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - mixcoord
 
@@ -164,7 +164,7 @@ ${PULSAR_SERVICE_BLOCK}
     network_mode: host
     restart: always
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - proxy
 
