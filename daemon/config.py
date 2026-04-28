@@ -43,6 +43,32 @@ class DaemonConfig(BaseSettings):
     keepalive_interval_s: int = 5
     log_level: str = "info"
 
+    # Watchdog (stage 12) — see daemon/watchdog.py.
+    watchdog_mode: str = Field(
+        default="auto",
+        description="auto = auto-restart local unhealthy containers; monitor = alerts only.",
+    )
+    watchdog_interval_s: int = Field(
+        default=10,
+        description="Seconds between watchdog ticks (local + peer probes).",
+    )
+    watchdog_unhealthy_threshold: int = Field(
+        default=3,
+        description="Consecutive unhealthy ticks before auto-restart fires.",
+    )
+    watchdog_peer_failure_threshold: int = Field(
+        default=6,
+        description="Consecutive peer-probe failures before PEER_DOWN_ALERT fires.",
+    )
+    watchdog_restart_loop_window_s: int = Field(
+        default=300,
+        description="Window (s) within which N restarts trip the loop guard.",
+    )
+    watchdog_restart_loop_max: int = Field(
+        default=3,
+        description="Max auto-restarts per container in the loop-window.",
+    )
+
     @property
     def etcd_endpoint_list(self) -> list[str]:
         """Split the comma-separated `etcd_endpoints` into a list,

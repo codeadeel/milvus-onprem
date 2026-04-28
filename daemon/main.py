@@ -25,6 +25,7 @@ from .handlers import TopologyHandlers
 from .jobs import JobsManager
 from .leader import LeaderElector
 from .topology import TOPOLOGY_PREFIX, TopologyWatcher
+from .watchdog import LocalComponentWatchdog, PeerReachabilityWatchdog
 from . import workers  # noqa: F401  — import side-effect registers job handlers
 
 
@@ -106,6 +107,14 @@ async def lifespan(app: FastAPI):
     # `daemon.workers/__init__.py`, before this point.
     jobs_mgr = JobsManager(etcd=etcd, leader=elector, node_name=config.node_name)
 
+    # Stage 12 watchdogs. Both run on every peer:
+    #   - local: docker-restart unhealthy milvus-* containers (loop-guarded)
+    #   - peer:  TCP-probe peers, emit PEER_DOWN_ALERT / PEER_UP_ALERT
+    # These observe and act locally; no leader gating — every daemon owns
+    # remediation for its own node.
+    local_watchdog = LocalComponentWatchdog(config)
+    peer_watchdog = PeerReachabilityWatchdog(config, topology)
+
     # Stash on app.state so route handlers can read them.
     app.state.config = config
     app.state.etcd = etcd
@@ -113,6 +122,8 @@ async def lifespan(app: FastAPI):
     app.state.topology = topology
     app.state.handlers = handlers
     app.state.jobs = jobs_mgr
+    app.state.local_watchdog = local_watchdog
+    app.state.peer_watchdog = peer_watchdog
 
     # Idempotently register ourselves in the topology before kicking off
     # the watcher — that way the very first observation already includes
@@ -124,6 +135,19 @@ async def lifespan(app: FastAPI):
 
     elector_task = asyncio.create_task(elector.run(), name="leader-elector")
     topology_task = asyncio.create_task(topology.run(), name="topology-watcher")
+    local_watchdog_task = asyncio.create_task(
+        local_watchdog.run(), name="local-watchdog"
+    )
+    peer_watchdog_task = asyncio.create_task(
+        peer_watchdog.run(), name="peer-watchdog"
+    )
+
+    background_tasks = (
+        elector_task,
+        topology_task,
+        local_watchdog_task,
+        peer_watchdog_task,
+    )
 
     try:
         yield
@@ -131,9 +155,11 @@ async def lifespan(app: FastAPI):
         log.info("shutdown initiated")
         await elector.stop()
         await topology.stop()
-        for t in (elector_task, topology_task):
+        await local_watchdog.stop()
+        await peer_watchdog.stop()
+        for t in background_tasks:
             t.cancel()
-        for t in (elector_task, topology_task):
+        for t in background_tasks:
             try:
                 await t
             except (asyncio.CancelledError, Exception):
