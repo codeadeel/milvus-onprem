@@ -367,6 +367,40 @@ class UpgradeSelfResponse(BaseModel):
     error: str | None = None
 
 
+class RecreateMinioSelfResponse(BaseModel):
+    """Result of a `POST /recreate-minio-self` call."""
+
+    healthy: bool
+    error: str | None = None
+
+
+@router.post(
+    "/recreate-minio-self",
+    dependencies=[Depends(require_token)],
+    tags=["internal"],
+    response_model=RecreateMinioSelfResponse,
+)
+async def post_recreate_minio_self(request: Request) -> Any:
+    """Recreate this node's milvus-minio container with the freshly
+    rendered compose (which now reflects an updated PEER_IPS).
+
+    Called by the leader's `_rolling_minio_recreate` sweep when topology
+    changes. Auth-gated by the cluster bearer token; not meant for
+    operators directly. Blocks until MinIO is healthy (or 90s timeout)
+    so the leader's rolling loop naturally waits between peers."""
+    handlers = request.app.state.handlers
+    try:
+        await handlers.recreate_minio_local()
+        # The local recreate has already waited for healthy; if it
+        # returned, MinIO is healthy on this node.
+        return RecreateMinioSelfResponse(healthy=True, error=None)
+    except Exception as e:
+        log.exception("recreate-minio-self failed")
+        return RecreateMinioSelfResponse(
+            healthy=False, error=f"{type(e).__name__}: {e}"
+        )
+
+
 @router.post(
     "/upgrade-self",
     dependencies=[Depends(require_token)],

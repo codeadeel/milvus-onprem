@@ -97,18 +97,17 @@ class TopologyHandlers:
         # Second: nginx reload. Cheap, non-disruptive (signal-based).
         await self._reload_nginx()
 
-        # Third: recreate this node's MinIO container so it picks up
-        # the new MINIO_VOLUMES (which now lists every peer's 4 drives,
-        # including the new peer's). docker compose up -d --force-
-        # recreate is the right tool — `docker restart` preserves the
-        # container's create-time command and would silently miss the
-        # pool change. Every daemon does this in parallel; the cluster
-        # has a brief MinIO blip while peers re-form distributed-mode
-        # quorum (~30s on a small grow), then settles. No leader-only
-        # gating — every peer needs to update its own server. v1 trade-
-        # off; future stages can sequence this for zero-downtime.
-        if kind in ("ADDED", "REMOVED"):
-            await self._recreate_minio()
+        # Third: recreate every peer's MinIO sequentially so the
+        # cluster keeps quorum throughout. Only the leader drives the
+        # sweep — followers' handlers stop here; the leader's HTTP
+        # call to /recreate-minio-self is what triggers their recreate
+        # in turn. Leader does itself first, then iterates other peers
+        # in sorted node-N order (skipping the just-added peer if any
+        # — its MinIO will start with the new layout via bootstrap).
+        # This replaces the v1 "every peer in parallel" approach which
+        # caused a brief cluster-wide MinIO blip on grow / shrink.
+        if kind in ("ADDED", "REMOVED") and self._leader.is_leader:
+            await self._rolling_minio_recreate(kind=kind, new=new)
 
     # ── primitive operations ─────────────────────────────────────────
 
@@ -165,9 +164,9 @@ class TopologyHandlers:
         else:
             log.info("nginx reloaded")
 
-    async def _recreate_minio(self) -> None:
-        """Recreate the local milvus-minio container with the freshly
-        rendered compose so MinIO learns about the new pool layout.
+    async def recreate_minio_local(self) -> None:
+        """Recreate THIS node's milvus-minio container and wait for
+        it to report healthy.
 
         Why recreate vs restart: `docker restart` keeps the container's
         original create-time command, which means the new MINIO_VOLUMES
@@ -175,12 +174,9 @@ class TopologyHandlers:
         MinIO. `docker compose up -d --force-recreate` rebuilds the
         container with the new spec.
 
-        This is sync from this node's perspective: we issue the recreate,
-        compose returns when the new container is started, then we move
-        on. Cross-peer coordination is implicit — every daemon does its
-        own recreate roughly in parallel after the topology event. The
-        cluster has a brief blip while MinIOs renegotiate; that's the
-        cost of the simple non-orchestrated approach in v1.
+        Public (no underscore prefix) because the per-peer
+        `/recreate-minio-self` route on api.py calls this directly when
+        the leader-driven rolling sweep RPCs in.
         """
         node_dir = f"{REPO_PATH}/rendered/{self._cfg.node_name}"
         cmd = (
@@ -192,8 +188,82 @@ class TopologyHandlers:
         if rc != 0:
             log.warning("minio recreate failed (rc=%d): %s",
                         rc, err.strip()[:400])
-        else:
-            log.info("minio recreated with new pool layout")
+            return
+        log.info("minio recreated; waiting for healthy")
+        await _wait_minio_healthy(timeout_s=90)
+
+    async def _rolling_minio_recreate(
+        self,
+        kind: str,
+        new: dict[str, Any] | None,
+    ) -> None:
+        """Leader-driven rolling recreate of every peer's MinIO.
+
+        Sequenced: leader does itself first (we already have the freshest
+        rendered/), then iterates other peers in sorted node-N order,
+        HTTP-POSTing each peer's /recreate-minio-self with the cluster
+        token. Each call is synchronous — the followers' endpoint
+        doesn't return until its local MinIO is back to healthy — so
+        the leader naturally waits between peers.
+
+        Skips:
+          - The just-added peer (kind=ADDED, new.ip): its MinIO starts
+            fresh with the right MINIO_VOLUMES via bootstrap, no need
+            to recreate.
+          - The leader itself (handled inline above the loop, not via
+            self-RPC).
+
+        Failure of any peer logs a warning and continues — partial
+        progress is better than aborting and leaving half the cluster
+        on the old MINIO_VOLUMES. The next topology event will retry
+        any missed peer.
+        """
+        # Lazy import — keeps module-load free of httpx if a deployment
+        # never reaches this code path (standalone mode etc.).
+        import httpx
+
+        skip_ip = (new or {}).get("ip") if kind == "ADDED" else None
+
+        # Self first — must be done before we ask peers to do theirs,
+        # so the new MINIO_VOLUMES propagates from a known-up MinIO.
+        log.info("rolling MinIO recreate: starting on self (%s)",
+                 self._cfg.node_name)
+        await self.recreate_minio_local()
+
+        # Followers in sorted node-N order so behavior is deterministic.
+        from .joining import _node_sort_key
+
+        for name in sorted(self._topology.peers, key=_node_sort_key):
+            info = self._topology.peers.get(name) or {}
+            ip = info.get("ip")
+            if not ip or ip == self._cfg.local_ip:
+                continue
+            if ip == skip_ip:
+                log.info("rolling MinIO recreate: skipping new peer %s "
+                         "(its MinIO starts with the right layout)", name)
+                continue
+
+            url = f"http://{ip}:{self._cfg.listen_port}/recreate-minio-self"
+            log.info("rolling MinIO recreate: -> %s @ %s", name, ip)
+            try:
+                async with httpx.AsyncClient(timeout=180.0) as client:
+                    resp = await client.post(
+                        url,
+                        headers={
+                            "Authorization": f"Bearer {self._cfg.cluster_token}",
+                        },
+                    )
+                if resp.status_code != 200:
+                    log.warning(
+                        "rolling MinIO recreate: %s returned HTTP %d: %s",
+                        name, resp.status_code, resp.text[:200],
+                    )
+                else:
+                    log.info("rolling MinIO recreate: %s done", name)
+            except Exception as e:
+                log.warning("rolling MinIO recreate: %s errored: %s", name, e)
+
+        log.info("rolling MinIO recreate: complete")
 
     def _current_peer_ips(self) -> list[str]:
         """Return peer IPs from the in-memory topology mirror.
@@ -218,6 +288,26 @@ class TopologyHandlers:
 
 
 # ── subprocess + cluster.env edit helpers (sync, run via to_thread) ──
+
+
+async def _wait_minio_healthy(timeout_s: int = 90) -> bool:
+    """Poll `docker inspect milvus-minio` until health=healthy or timeout.
+
+    Used by both the local-node recreate path and the per-peer
+    `/recreate-minio-self` route — the rolling sweep relies on this
+    blocking until MinIO's distributed-mode quorum has re-formed
+    before moving to the next peer.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    while asyncio.get_event_loop().time() < deadline:
+        rc, out, _ = await _run(
+            "docker inspect milvus-minio --format '{{.State.Health.Status}}'"
+        )
+        if rc == 0 and out.strip() == "healthy":
+            return True
+        await asyncio.sleep(2)
+    log.warning("minio did not return to healthy within %ds", timeout_s)
+    return False
 
 
 async def _run(cmd: str) -> tuple[int, str, str]:
