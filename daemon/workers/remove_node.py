@@ -92,59 +92,73 @@ async def run_remove_node(ctx: JobContext) -> None:
     ctx.log_writer(f"removing peer {target_name} @ {target_ip} from cluster of {topology.peer_count}")
     ctx.progress_setter(0.05)
 
-    # 2. Decommission the leaving peer's MinIO pool. Discover the pool's
-    #    "address" (URL form) by reading the local MinIO's pool list.
+    # 2. Decommission the leaving peer's MinIO pool.
     pool_url_pattern = (
         f"http://{target_ip}:{_minio_api_port()}/drive{{1...4}}"
     )
-    ctx.log_writer(f"==> mc admin decommission start  pool={pool_url_pattern}")
-    rc, out, err = await _run(
+    target_pool_url_fragment = f"{target_ip}:{_minio_api_port()}/drive"
+
+    # mc alias prep (no-op after first run; cheap to repeat).
+    await _run(
         f"docker exec milvus-minio mc alias set local "
         f"http://127.0.0.1:{_minio_api_port()} "
         f"{_minio_access()} {_minio_secret()}"
     )
-    if rc != 0:
-        ctx.log_writer(f"mc alias set failed: {err.strip()[:200]}")
-    rc, out, err = await _run(
-        f"docker exec milvus-minio mc admin decommission start local '{pool_url_pattern}'"
-    )
-    ctx.log_writer(out.rstrip())
-    if rc != 0:
-        if "already decommissioning" in (out + err).lower():
-            ctx.log_writer("(pool was already decommissioning — continuing)")
-        else:
+
+    # Pre-flight: check current status — skip start() if the pool is
+    # already decommissioned (idempotency on retry).
+    pool_state = await _decommission_state(target_pool_url_fragment)
+    ctx.log_writer(f"current decommission state for pool: {pool_state}")
+
+    if pool_state == "complete":
+        ctx.log_writer("(pool already decommissioned — skipping start)")
+    elif pool_state == "active":
+        ctx.log_writer("(pool decommission already in progress — skipping start)")
+    else:
+        ctx.log_writer(f"==> mc admin decommission start pool={pool_url_pattern}")
+        rc, out, err = await _run(
+            f"docker exec milvus-minio mc admin decommission start local "
+            f"'{pool_url_pattern}'"
+        )
+        ctx.log_writer(out.rstrip())
+        combined = (out + err).lower()
+        if rc != 0 and not any(
+            s in combined for s in (
+                "already decommissioning",
+                "already decommissioned",
+                "no pool",
+            )
+        ):
             raise RuntimeError(
-                f"mc admin decommission start failed (rc={rc}): {err.strip()[:300]}"
+                f"mc admin decommission start failed (rc={rc}): "
+                f"{err.strip()[:300]}"
             )
     ctx.progress_setter(0.10)
 
-    # 3. Poll status until decommission completes. Cap at 30 minutes —
-    #    longer is a real-data-volume issue the operator should know
-    #    about, not a bug for the daemon to keep waiting on.
+    # 3. Poll status until the LEAVING POOL'S row shows "Complete".
+    #    Important: the status table includes every pool — surviving
+    #    pools always show "Active". We have to check the specific row
+    #    for our target pool, not the whole text.
     ctx.log_writer("==> waiting for decommission to complete (poll every 5s)")
     deadline = 30 * 60
     elapsed = 0
     while True:
-        rc, out, err = await _run(
-            "docker exec milvus-minio mc admin decommission status local"
-        )
-        # Status output mentions "Active" while running, "Complete" or
-        # "Completed" when done. Be lenient about the exact wording.
-        text = (out + "\n" + err).lower()
-        ctx.log_writer(out.rstrip())
-        if "complete" in text and "active" not in text:
+        state = await _decommission_state(target_pool_url_fragment)
+        if state == "complete":
             ctx.log_writer("decommission complete")
             break
-        if "no decommission in progress" in text:
-            ctx.log_writer("(no decommission in progress — assuming done)")
+        if state == "missing":
+            # Pool no longer in the status table — could mean it was
+            # already removed / never existed. Treat as done.
+            ctx.log_writer("(pool not in status table — assuming done)")
             break
         if elapsed >= deadline:
             raise RuntimeError(
                 "MinIO decommission did not complete within 30 min — abort. "
-                "operator can `mc admin decommission status local` from "
-                "milvus-minio to inspect; rerun once data movement settles."
+                "operator can run "
+                "`docker exec milvus-minio mc admin decommission status local` "
+                "to inspect; rerun once data movement settles."
             )
-        # Update progress as a rough proxy; keep below 0.7 until step 4.
         ctx.progress_setter(min(0.6, 0.10 + (elapsed / deadline) * 0.5))
         await asyncio.sleep(5)
         elapsed += 5
@@ -192,6 +206,44 @@ async def run_remove_node(ctx: JobContext) -> None:
 
 
 # ── helpers ──────────────────────────────────────────────────────────
+
+
+async def _decommission_state(target_url_fragment: str) -> str:
+    """Return the decommission state for the pool whose URL contains
+    `target_url_fragment` (e.g. "10.0.0.5:9000/drive").
+
+    Possible return values:
+      "active"   — decommission in progress for this pool
+      "complete" — decommission finished
+      "missing"  — pool not present in the status table (already
+                   removed, or never existed)
+      "none"     — no decommission has been started
+
+    The mc CLI doesn't expose --json on this subcommand consistently
+    across versions, so we parse the text table. Surviving pools'
+    rows always show "Active" — we MUST check the specific row for
+    our target, not the whole output.
+    """
+    rc, out, err = await _run(
+        "docker exec milvus-minio mc admin decommission status local"
+    )
+    combined_lower = (out + err).lower()
+    if "no decommission" in combined_lower:
+        return "none"
+
+    for line in out.splitlines():
+        if target_url_fragment not in line:
+            continue
+        line_lower = line.lower()
+        if "complete" in line_lower:
+            return "complete"
+        if "active" in line_lower:
+            return "active"
+        # Row exists but neither status keyword present — be conservative
+        # and treat as still in progress.
+        return "active"
+
+    return "missing"
 
 
 def _find_node_name_by_ip(
