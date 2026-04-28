@@ -58,7 +58,7 @@ services:
       - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
       - MINIO_REGION=${MINIO_REGION}
     volumes:
-      - ${DATA_ROOT}/minio:/data
+${MINIO_VOLUMES_BLOCK}
     command: ${MINIO_SERVER_CMD}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${MINIO_API_PORT}/minio/health/live"]
@@ -167,3 +167,5 @@ ${PULSAR_SERVICE_BLOCK}
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - proxy
+
+${CONTROL_PLANE_SERVICE_BLOCK}
