@@ -108,11 +108,37 @@ async def _do_join(
         except json.JSONDecodeError:
             log.warning("ignoring malformed topology entry %s", name)
 
-    # Reject duplicates by IP — distinct nodes should have distinct IPs.
+    # Idempotent re-join by IP. If this IP is already in topology, return
+    # the existing allocation rather than erroring — supports the
+    # operator's `./milvus-onprem join … --resume` UX after an
+    # SSH-dropped or otherwise interrupted first join. The leader still
+    # had us in etcd + topology, so we rebuild a fresh cluster_env body
+    # from current state (peer list may have changed since last call)
+    # and return it. Skips member-add (already a member) and the
+    # topology PUT (already written).
     for name, info in parsed.items():
         if info.get("ip") == joiner_ip:
-            raise JoinError(
-                f"a peer with ip {joiner_ip} is already registered as {name}"
+            log.info(
+                "idempotent re-join: %s already registered as %s; "
+                "returning fresh cluster_env without re-adding to etcd",
+                joiner_ip, name,
+            )
+            existing_peer_ips = _ordered_peer_ips_after_join(
+                {k: v for k, v in parsed.items() if k != name},
+                name,
+                joiner_ip,
+            )
+            cluster_env_text = _build_joiner_cluster_env(
+                leader_env=_read_cluster_env(),
+                node_name=name,
+                local_ip=joiner_ip,
+                all_peer_ips=existing_peer_ips,
+            )
+            return JoinResult(
+                node_name=name,
+                local_ip=joiner_ip,
+                cluster_env=cluster_env_text,
+                leader_ip=config.local_ip,
             )
 
     new_name = _allocate_next_name(parsed.keys())

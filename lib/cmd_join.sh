@@ -24,16 +24,37 @@ cmd_join() {
   fi
 
   local target="$1" token="$2"; shift 2
-  local local_ip=""
+  local local_ip="" resume=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --local-ip=*) local_ip="${1#*=}"; shift ;;
+      --resume)     resume=1; shift ;;
       *) die "unknown flag: $1 (try --help)" ;;
     esac
   done
 
   if [[ -f "$CLUSTER_ENV" ]]; then
-    die "cluster.env already exists at $CLUSTER_ENV — \`./milvus-onprem teardown --full --force\` first if you really want to re-join"
+    if [[ $resume -eq 1 ]] && grep -q "^ETCD_INITIAL_CLUSTER_STATE=existing" "$CLUSTER_ENV"; then
+      info "==> --resume: cluster.env already present (join-originated); skipping /join POST"
+      env_load >/dev/null
+      host_prep "$DATA_ROOT" "${MODE:-distributed}"
+      if [[ "${MODE:-distributed}" == "distributed" ]]; then
+        _join_build_daemon_image
+      fi
+      info "==> resuming bootstrap"
+      cmd_bootstrap
+      echo ""
+      echo "========================================================================"
+      echo "  resumed (cluster.env was already on disk; bootstrap re-run)"
+      echo "========================================================================"
+      echo "  Verify from any node:    ./milvus-onprem status"
+      echo "========================================================================"
+      return 0
+    fi
+    if [[ $resume -eq 1 ]]; then
+      die "--resume: $CLUSTER_ENV exists but lacks ETCD_INITIAL_CLUSTER_STATE=existing (not from a join). Use teardown then plain join."
+    fi
+    die "cluster.env already exists at $CLUSTER_ENV — to resume a partial join (e.g. SSH dropped before bootstrap finished) run with --resume; otherwise \`./milvus-onprem teardown --full --force\` first."
   fi
 
   # Auto-detect our own IP (operator can override with --local-ip if
@@ -198,6 +219,13 @@ ARGS:
 
 OPTIONS:
   --local-ip=IP     Override hostname -I auto-detection.
+  --resume          Re-run bootstrap when cluster.env already exists from
+                    a previous join attempt that didn't finish (e.g. SSH
+                    dropped between cluster.env write and bootstrap
+                    completing). Skips the /join HTTP call and proceeds
+                    straight to host_prep + bootstrap. Refuses if
+                    cluster.env exists but doesn't carry the join
+                    marker (ETCD_INITIAL_CLUSTER_STATE=existing).
   -h, --help        Show this help.
 
 After join completes, this node is fully part of the cluster — etcd
