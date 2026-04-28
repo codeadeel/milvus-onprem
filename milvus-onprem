@@ -101,6 +101,7 @@ main() {
     create-backup)   cmd_create_backup   "$@" ;;
     export-backup)   cmd_export_backup   "$@" ;;
     restore-backup)  cmd_restore_backup  "$@" ;;
+    jobs)            cmd_jobs            "$@" ;;
     smoke)           cmd_smoke           "$@" ;;
     version)         cmd_version         "$@" ;;
     urls)            cmd_urls            "$@" ;;

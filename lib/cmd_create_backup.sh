@@ -66,6 +66,17 @@ EOF
   env_require
   role_detect
 
+  # Route through the persistent control plane in distributed mode.
+  # The daemon's worker calls back into THIS script with the env var
+  # MILVUS_ONPREM_INTERNAL=1 set, which is the recursion guard.
+  if [[ "${MODE:-standalone}" == "distributed" \
+        && "${MILVUS_ONPREM_INTERNAL:-}" != "1" \
+        && "$list_only" -eq 0 ]]; then
+    [[ -n "$name" ]] || die "--name is required"
+    _create_backup_via_daemon "$name" "$collections" "$strategy"
+    return $?
+  fi
+
   backup_download_binary
 
   if (( list_only )); then
@@ -110,4 +121,80 @@ EOF
 # pre-flight before backup operations on Milvus 2.5 clusters.
 _pulsar_reachable() {
   timeout 3 bash -c "</dev/tcp/${PULSAR_HOST_IP}/${PULSAR_BROKER_PORT}" 2>/dev/null
+}
+
+# POST a create-backup job to the local daemon, then poll until the job
+# reaches a terminal state. Streams the daemon-captured logs as they
+# arrive (or, more precisely, polls /jobs/<id> every 2s and prints the
+# new tail). Returns 0 if the job ended in `done`, non-zero otherwise.
+_create_backup_via_daemon() {
+  local name="$1" collections="$2" strategy="$3"
+  local cp_url="http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}"
+  local token="${CLUSTER_TOKEN:-}"
+  [[ -n "$token" ]] || die "CLUSTER_TOKEN missing in cluster.env (distributed mode requires it)"
+
+  # Build the JSON body. Skip params we don't have so the daemon-side
+  # validation only sees what the operator actually passed.
+  local body
+  body=$(python3 -c "
+import json, sys
+out = {'type': 'create-backup', 'params': {'name': '$name'}}
+if '''$collections''': out['params']['collections'] = '''$collections'''
+if '''$strategy''':    out['params']['strategy']    = '''$strategy'''
+print(json.dumps(out))
+")
+
+  info "==> POST /jobs (create-backup name=$name) on $cp_url"
+  local resp
+  resp=$(curl -fsS --location-trusted --max-time 30 \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -d "$body" \
+    "$cp_url/jobs")
+  if [[ -z "$resp" ]]; then
+    die "POST /jobs returned no body — daemon unreachable?"
+  fi
+  local job_id
+  job_id=$(printf '%s' "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+  ok "job created: $job_id"
+
+  _poll_job "$job_id" "$cp_url" "$token"
+}
+
+# Poll a job by id until it terminates. Print new log lines on each
+# poll. Returns 0 if state=done, 1 otherwise.
+_poll_job() {
+  local jid="$1" cp_url="$2" token="$3"
+  local last_log_count=0
+  local state="pending"
+  while :; do
+    sleep 2
+    local body
+    body=$(curl -fsS --max-time 10 \
+      -H "Authorization: Bearer $token" \
+      "$cp_url/jobs/$jid") || { warn "poll failed; retrying"; continue; }
+
+    # Print any new log lines.
+    local lines
+    lines=$(printf '%s' "$body" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+for line in (d.get('logs') or [])[$last_log_count:]:
+    print(line)
+")
+    if [[ -n "$lines" ]]; then
+      printf '%s\n' "$lines"
+      last_log_count=$(printf '%s' "$body" | python3 -c "
+import json,sys; print(len(json.load(sys.stdin).get('logs') or []))")
+    fi
+
+    state=$(printf '%s' "$body" | python3 -c "import json,sys; print(json.load(sys.stdin)['state'])")
+    case "$state" in
+      done)      ok "backup job $jid completed"; return 0 ;;
+      failed)    err "backup job $jid failed"; return 1 ;;
+      cancelled) err "backup job $jid was cancelled"; return 1 ;;
+      pending|running) ;;  # keep polling
+      *) warn "unknown job state $state"; ;;
+    esac
+  done
 }

@@ -23,8 +23,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
+from dataclasses import asdict
+
 from .auth import require_token
 from .joining import JoinError, handle_join
+from .jobs import known_types
 from .leader import LEADER_KEY
 
 router = APIRouter()
@@ -48,6 +51,15 @@ class JoinResponse(BaseModel):
     local_ip: str
     cluster_env: str
     leader_ip: str
+
+
+class CreateJobRequest(BaseModel):
+    """Body for `POST /jobs`. The `type` must be in known_types() — list
+    via `GET /jobs/types`. `params` is opaque; each worker validates its
+    own shape."""
+
+    type: str = Field(..., description="Registered job type, e.g. 'create-backup'.")
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.get("/health", tags=["meta"])
@@ -251,3 +263,87 @@ async def post_join(req: JoinRequest, request: Request) -> Any:
         cluster_env=result.cluster_env,
         leader_ip=result.leader_ip,
     )
+
+
+# ─── Jobs ────────────────────────────────────────────────────────────
+
+
+@router.get("/jobs/types", dependencies=[Depends(require_token)], tags=["jobs"])
+async def list_job_types() -> dict[str, Any]:
+    """Enumerate registered job types. Useful for CLI / API discovery."""
+    return {"types": known_types()}
+
+
+@router.get("/jobs", dependencies=[Depends(require_token)], tags=["jobs"])
+async def list_jobs(
+    request: Request,
+    state: str | None = None,
+) -> dict[str, Any]:
+    """List jobs from etcd, optionally filtered by state.
+
+    Reads work on any daemon — etcd is the source of truth and every
+    daemon's mirror sees the same view.
+    """
+    items = await request.app.state.jobs.list_jobs(state=state)
+    return {"count": len(items), "jobs": [asdict(j) for j in items]}
+
+
+@router.get("/jobs/{job_id}", dependencies=[Depends(require_token)], tags=["jobs"])
+async def get_job(job_id: str, request: Request) -> dict[str, Any]:
+    """Fetch a single job by id. 404 if unknown."""
+    job = await request.app.state.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"job {job_id} not found")
+    return asdict(job)
+
+
+@router.post("/jobs", dependencies=[Depends(require_token)], tags=["jobs"])
+async def post_job(req: CreateJobRequest, request: Request) -> Any:
+    """Create + schedule a new job.
+
+    Leader-only — worker tasks run on the leader, so a job created on a
+    follower would have nowhere to execute. We 307-redirect followers
+    to the leader (same pattern as /join).
+    """
+    leader = request.app.state.leader
+    etcd = request.app.state.etcd
+    config = request.app.state.config
+
+    if not leader.is_leader:
+        leader_info_raw = await etcd.get(LEADER_KEY)
+        if not leader_info_raw:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="no leader currently; retry shortly",
+            )
+        try:
+            info = json.loads(leader_info_raw)
+            return RedirectResponse(
+                url=f"http://{info['ip']}:{config.listen_port}/jobs",
+                status_code=307,
+            )
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"leader info unparsable: {e}",
+            )
+
+    try:
+        job = await request.app.state.jobs.create(req.type, req.params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    return asdict(job)
+
+
+@router.post(
+    "/jobs/{job_id}/cancel",
+    dependencies=[Depends(require_token)],
+    tags=["jobs"],
+)
+async def cancel_job(job_id: str, request: Request) -> dict[str, Any]:
+    """Best-effort cancel. Returns whether the running task was found."""
+    cancelled = await request.app.state.jobs.cancel(job_id)
+    return {"job_id": job_id, "cancelled": cancelled}

@@ -22,8 +22,10 @@ from .api import router
 from .config import DaemonConfig
 from .etcd_client import EtcdClient
 from .handlers import TopologyHandlers
+from .jobs import JobsManager
 from .leader import LeaderElector
 from .topology import TOPOLOGY_PREFIX, TopologyWatcher
+from . import workers  # noqa: F401  — import side-effect registers job handlers
 
 
 def _setup_logging(level_name: str) -> None:
@@ -99,12 +101,18 @@ async def lifespan(app: FastAPI):
     )
     topology.on_change(handlers)
 
+    # Jobs manager — owns the long-running async-job lifecycle.
+    # Registration of job types happens at import time via
+    # `daemon.workers/__init__.py`, before this point.
+    jobs_mgr = JobsManager(etcd=etcd, leader=elector, node_name=config.node_name)
+
     # Stash on app.state so route handlers can read them.
     app.state.config = config
     app.state.etcd = etcd
     app.state.leader = elector
     app.state.topology = topology
     app.state.handlers = handlers
+    app.state.jobs = jobs_mgr
 
     # Idempotently register ourselves in the topology before kicking off
     # the watcher — that way the very first observation already includes
