@@ -52,7 +52,14 @@ cmd_join() {
   body=$(printf '{"ip":"%s","hostname":"%s"}' "$local_ip" "$(hostname -s 2>/dev/null || true)")
   local resp http_code
   local resp_file; resp_file="$(mktemp)"
-  http_code="$(curl -sSL --max-time 60 \
+  # `--location-trusted` (vs `-L`) keeps the Authorization header
+  # across redirects. Required because followers 307-redirect /join to
+  # the current leader, which is on a different host. Safe here: every
+  # daemon in the cluster shares the same CLUSTER_TOKEN, so leaking
+  # the header to a peer is a no-op. Default `-L` would strip the
+  # header on cross-host redirects (curl's anti-credential-leak rule),
+  # leaving the leader to reject with 401 missing-bearer-token.
+  http_code="$(curl -sS --location-trusted --max-time 60 \
     -o "$resp_file" -w "%{http_code}" \
     -X POST \
     -H "Authorization: Bearer $token" \
