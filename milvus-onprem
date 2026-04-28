@@ -102,6 +102,7 @@ main() {
     export-backup)   cmd_export_backup   "$@" ;;
     restore-backup)  cmd_restore_backup  "$@" ;;
     jobs)            cmd_jobs            "$@" ;;
+    remove-node)     cmd_remove_node     "$@" ;;
     smoke)           cmd_smoke           "$@" ;;
     version)         cmd_version         "$@" ;;
     urls)            cmd_urls            "$@" ;;
