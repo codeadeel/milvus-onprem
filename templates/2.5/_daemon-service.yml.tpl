@@ -17,6 +17,14 @@
       - MILVUS_ONPREM_ETCD_ENDPOINTS=http://${LOCAL_IP}:${ETCD_CLIENT_PORT}
       - MILVUS_ONPREM_ETCD_PEER_PORT=${ETCD_PEER_PORT}
       - MILVUS_ONPREM_LISTEN_PORT=${CONTROL_PLANE_PORT}
+      # Watchdog knobs — flip MODE to `monitor` to suppress local
+      # auto-restart while keeping the alert lines.
+      - MILVUS_ONPREM_WATCHDOG_MODE=${WATCHDOG_MODE}
+      - MILVUS_ONPREM_WATCHDOG_INTERVAL_S=${WATCHDOG_INTERVAL_S}
+      - MILVUS_ONPREM_WATCHDOG_UNHEALTHY_THRESHOLD=${WATCHDOG_UNHEALTHY_THRESHOLD}
+      - MILVUS_ONPREM_WATCHDOG_PEER_FAILURE_THRESHOLD=${WATCHDOG_PEER_FAILURE_THRESHOLD}
+      - MILVUS_ONPREM_WATCHDOG_RESTART_LOOP_WINDOW_S=${WATCHDOG_RESTART_LOOP_WINDOW_S}
+      - MILVUS_ONPREM_WATCHDOG_RESTART_LOOP_MAX=${WATCHDOG_RESTART_LOOP_MAX}
     volumes:
       # /join reads cluster.env to build a copy for the joining peer.
       # Read-only — the daemon never edits cluster.env directly.

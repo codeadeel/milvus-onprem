@@ -112,9 +112,15 @@ _env_apply_defaults() {
   : "${PULSAR_BROKER_PORT:=6650}"
   : "${PULSAR_HTTP_PORT:=8080}"
 
-  : "${WATCHDOG_MODE:=monitor}"
-  : "${WATCHDOG_INTERVAL_S:=5}"
-  : "${WATCHDOG_FAILURE_THRESHOLD:=6}"
+  # Watchdog (control-plane daemon, distributed mode only).
+  # Defaults match daemon/config.py so an unset cluster.env behaves
+  # identically with or without the env-var passthrough.
+  : "${WATCHDOG_MODE:=auto}"
+  : "${WATCHDOG_INTERVAL_S:=10}"
+  : "${WATCHDOG_UNHEALTHY_THRESHOLD:=3}"
+  : "${WATCHDOG_PEER_FAILURE_THRESHOLD:=6}"
+  : "${WATCHDOG_RESTART_LOOP_WINDOW_S:=300}"
+  : "${WATCHDOG_RESTART_LOOP_MAX:=3}"
 
   : "${PAIR_PORT:=19500}"
 
