@@ -59,11 +59,19 @@ EOF
   fi
 
   info "stopping containers"
-  dc down --remove-orphans --volumes 2>/dev/null || {
-    # Fall back to a name-based sweep when no rendered compose exists
-    # (e.g. on a half-initialised node we're trying to recover).
-    docker rm -f milvus milvus-nginx milvus-minio milvus-etcd milvus-pulsar 2>/dev/null || true
-  }
+  # Use `dc down` only when the rendered compose file actually exists.
+  # `dc` itself calls `die` (exit 1) on a missing compose, which would
+  # abort teardown before it gets to wipe data / cluster.env. Teardown
+  # must remain a usable escape hatch on half-initialised nodes (e.g. a
+  # `join` that wrote cluster.env but never rendered), so we fall through
+  # to a name-based docker rm sweep when there's no compose to use.
+  local compose_file="${RENDERED_DIR:-$REPO_ROOT/rendered}/${NODE_NAME:-}/docker-compose.yml"
+  if [[ -n "${NODE_NAME:-}" && -f "$compose_file" ]]; then
+    dc down --remove-orphans --volumes 2>/dev/null || true
+  fi
+  docker rm -f milvus milvus-nginx milvus-minio milvus-etcd milvus-pulsar \
+    milvus-mixcoord milvus-proxy milvus-querynode milvus-datanode milvus-indexnode \
+    2>/dev/null || true
 
   info "wiping data dirs under $DATA_ROOT"
   sudo rm -rf "$DATA_ROOT/etcd" "$DATA_ROOT/minio" "$DATA_ROOT/milvus" "$DATA_ROOT/pulsar"
