@@ -84,7 +84,13 @@ cmd_join() {
     || die "response missing cluster_env body"
 
   ok "leader allocated $node_name; writing cluster.env"
-  printf '%s' "$cluster_env_body" > "$CLUSTER_ENV"
+  # bash $(...) strips trailing newlines from command substitution, so
+  # `cluster_env_body` is missing the leader's final '\n'. Without
+  # restoring it, the next `echo KEY=VAL >> cluster.env` (env_upsert_kv
+  # below) lands on the same line as the previous KEY=VAL, mashing two
+  # entries together. The %s\n re-adds exactly the one trailing newline
+  # the leader emitted.
+  printf '%s\n' "$cluster_env_body" > "$CLUSTER_ENV"
   chmod 600 "$CLUSTER_ENV"
 
   # The leader doesn't (and shouldn't) know the joiner's host repo

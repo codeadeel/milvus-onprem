@@ -183,6 +183,13 @@ _env_validate_topology() {
 env_upsert_kv() {
   local key="$1" value="$2"
   [[ -f "$CLUSTER_ENV" ]] || die "cluster.env missing — cannot upsert $key"
+  # Defensive: ensure cluster.env ends with a newline before any append-
+  # path runs. Without this, if a previous writer didn't terminate the
+  # last line cleanly, `echo "KEY=VAL" >>` lands on the previous line
+  # and mashes two settings together (e.g. DATA_ROOT=/dataHOST_REPO_ROOT=…).
+  if [[ -s "$CLUSTER_ENV" ]] && [[ "$(tail -c 1 "$CLUSTER_ENV")" != $'\n' ]]; then
+    printf '\n' >> "$CLUSTER_ENV"
+  fi
   local tmp
   tmp="$(mktemp "${CLUSTER_ENV}.XXXXXX")"
   if grep -q "^${key}=" "$CLUSTER_ENV"; then
