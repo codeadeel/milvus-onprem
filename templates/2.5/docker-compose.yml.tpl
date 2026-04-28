@@ -104,8 +104,29 @@ ${PULSAR_SERVICE_BLOCK}
     depends_on:
       - etcd
       - minio
+    # Mixcoord exposes /healthz but it's leader-only — standby mixcoords
+    # report rootcoord/datacoord/querycoord as unhealthy because they're
+    # passive. Probe the rootcoord gRPC port instead: both leader and
+    # standby bind it (standby keeps the listener for fast failover),
+    # so a TCP-connect distinguishes "process alive with sockets bound"
+    # from "process gone". Same /dev/tcp pattern as the workers.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/${MILVUS_ROOTCOORD_PORT}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
 
   # --- Milvus 2.5 proxy: gRPC entry, what nginx routes to -----------------
+  # Healthcheck note for the next 4 components: only mixcoord binds
+  # /healthz on :9091 in this topology, so each worker's healthcheck is
+  # a TCP probe of its own gRPC port using bash's /dev/tcp builtin (no
+  # extra binaries needed in the milvus image). Catches the common
+  # case where the binary crashes leaving the listener gone; for soft
+  # hangs the kernel may still SYN-ACK, so the watchdog won't always
+  # catch a wedge — but docker's `restart: always` plus this probe is
+  # strictly better than no healthcheck at all (= permanent
+  # health=none = LocalComponentWatchdog cannot fire).
   proxy:
     image: ${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}
     container_name: milvus-proxy
@@ -117,6 +138,12 @@ ${PULSAR_SERVICE_BLOCK}
       - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - mixcoord
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/${MILVUS_PORT}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
 
   # --- Milvus 2.5 querynode: query / search worker ------------------------
   querynode:
@@ -130,6 +157,12 @@ ${PULSAR_SERVICE_BLOCK}
       - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - mixcoord
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/${MILVUS_QUERYNODE_PORT}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
 
   # --- Milvus 2.5 datanode: ingest worker ---------------------------------
   datanode:
@@ -143,6 +176,12 @@ ${PULSAR_SERVICE_BLOCK}
       - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - mixcoord
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/${MILVUS_DATANODE_PORT}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
 
   # --- Milvus 2.5 indexnode: index-build worker ---------------------------
   indexnode:
@@ -156,6 +195,12 @@ ${PULSAR_SERVICE_BLOCK}
       - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       - mixcoord
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/${MILVUS_INDEXNODE_PORT}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
 
   # --- nginx: LB across all ${CLUSTER_SIZE} proxies on :${NGINX_LB_PORT} --
   nginx:

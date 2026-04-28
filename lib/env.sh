@@ -98,6 +98,16 @@ _env_apply_defaults() {
   : "${MINIO_CONSOLE_PORT:=9001}"
   : "${MILVUS_PORT:=19530}"
   : "${MILVUS_HEALTHZ_PORT:=9091}"
+  # Per-component gRPC ports — only Milvus 2.5's coord-mode-cluster
+  # topology binds these (each worker is its own container in 2.5).
+  # Used as TCP probe targets for the per-component healthchecks in
+  # templates/2.5/docker-compose.yml.tpl. Mixcoord probes 53100
+  # (rootcoord) — bound by both leader and standby, so it's a true
+  # "process is alive" signal that doesn't trip on standby instances.
+  : "${MILVUS_ROOTCOORD_PORT:=53100}"
+  : "${MILVUS_QUERYNODE_PORT:=21123}"
+  : "${MILVUS_DATANODE_PORT:=21124}"
+  : "${MILVUS_INDEXNODE_PORT:=21121}"
   : "${NGINX_LB_PORT:=19537}"
   : "${PULSAR_BROKER_PORT:=6650}"
   : "${PULSAR_HTTP_PORT:=8080}"
