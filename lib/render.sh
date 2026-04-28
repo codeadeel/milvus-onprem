@@ -125,13 +125,19 @@ _render_compute_derived() {
       - \${DATA_ROOT}/minio/drive4:/drive4"
     MINIO_VOLUMES_BLOCK="${MINIO_VOLUMES_BLOCK//\$\{DATA_ROOT\}/${DATA_ROOT}}"
 
+    # Each peer is its OWN MinIO server pool (4 drives via the
+    # `drive{1...4}` ellipsis MinIO understands). Multiple
+    # space-separated args make multiple pools; existing pools' on-
+    # disk format.json stays intact when a peer is added, so growing
+    # the cluster doesn't blow away existing data. Listing each drive
+    # individually instead would force MinIO to treat all drives as
+    # one pool, and at grow time it'd refuse to mount the old drives
+    # because their format.json says "you used to be a 4-drive pool,
+    # now you're an 8-drive pool — no thanks."
     MINIO_VOLUMES=""
     for ((i=0; i<CLUSTER_SIZE; i++)); do
       local ip="${PEERS_ARR[$i]}"
-      MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive1 "
-      MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive2 "
-      MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive3 "
-      MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive4 "
+      MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive{1...4} "
     done
     MINIO_VOLUMES="${MINIO_VOLUMES% }"
     MINIO_SERVER_CMD="server ${MINIO_VOLUMES} --address :${MINIO_API_PORT} --console-address :${MINIO_CONSOLE_PORT}"
