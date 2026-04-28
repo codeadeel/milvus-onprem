@@ -178,8 +178,14 @@ class EtcdClient:
         return out
 
     async def delete(self, key: str) -> None:
-        """Delete a single key. No error if it doesn't exist."""
-        await self._post("/v3/kv/delete_range", {"key": _b64(key)})
+        """Delete a single key. No error if it doesn't exist.
+
+        The etcd v3 HTTP gateway path is `deleterange` (one word) —
+        the underscored form returns 404. Latent bug since stage 2;
+        nothing actually called `delete()` until Stage 9b's
+        remove-node worker.
+        """
+        await self._post("/v3/kv/deleterange", {"key": _b64(key)})
 
     # ── transactions (CAS) ───────────────────────────────────────────
 
