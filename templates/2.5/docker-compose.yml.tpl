@@ -46,6 +46,13 @@ services:
       - --initial-cluster=${ETCD_INITIAL_CLUSTER}
       - --initial-cluster-token=${CLUSTER_NAME}
       - --initial-cluster-state=${ETCD_INITIAL_CLUSTER_STATE}
+    healthcheck:
+      # See 2.6 template note. etcdctl ships in the etcd image.
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:${ETCD_CLIENT_PORT}", "endpoint", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # --- MinIO: ${CLUSTER_SIZE}-node distributed cluster --------------------
   minio:
@@ -212,5 +219,12 @@ ${PULSAR_SERVICE_BLOCK}
       - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - proxy
+    healthcheck:
+      # See 2.6 template note. busybox `nc -z` ships in nginx:alpine.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${NGINX_LB_PORT} || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 ${CONTROL_PLANE_SERVICE_BLOCK}

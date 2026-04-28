@@ -2,3 +2,8 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1
 pydantic-settings==2.7.0
+# Used by lib/cmd_restore_backup.sh's _restore_drop_existing helper,
+# which is invoked under MILVUS_ONPREM_INTERNAL=1 inside the daemon
+# container during a /jobs restore-backup. Without pymilvus available,
+# --drop-existing was a silent no-op (QA finding F-A.3).
+pymilvus==2.6.12

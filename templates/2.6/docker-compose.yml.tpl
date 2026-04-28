@@ -37,6 +37,17 @@ services:
       - --initial-cluster=${ETCD_INITIAL_CLUSTER}
       - --initial-cluster-token=${CLUSTER_NAME}
       - --initial-cluster-state=${ETCD_INITIAL_CLUSTER_STATE}
+    healthcheck:
+      # `etcdctl endpoint health` reports OK when this member is
+      # current with the Raft log. Without this, the local watchdog
+      # had no way to detect a wedged etcd process (QA finding
+      # F-Phase1.C). Ships in the official etcd image at
+      # /usr/local/bin/etcdctl.
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:${ETCD_CLIENT_PORT}", "endpoint", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # --- MinIO: ${CLUSTER_SIZE}-node distributed cluster --------------------
   # Erasure-coded across all peers. For ${CLUSTER_SIZE}>=4 nodes this gives
@@ -94,6 +105,16 @@ ${MINIO_VOLUMES_BLOCK}
       - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - milvus
+    healthcheck:
+      # Verify the LB port is bound. nginx:alpine's busybox `nc -z`
+      # handles a connect-only probe without needing bash or curl.
+      # (QA finding F-Phase1.C — without this the watchdog couldn't
+      # see a wedged nginx process, only an exited container.)
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${NGINX_LB_PORT} || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 ${CONTROL_PLANE_SERVICE_BLOCK}
 

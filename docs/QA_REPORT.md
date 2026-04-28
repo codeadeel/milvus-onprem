@@ -28,6 +28,39 @@
 | F7.1 heredoc executes GNU join | `milvus-onprem` replace `` `join` `` with `'join'` | `nonsense` subcommand prints help cleanly, no spurious `join: missing operand` |
 | F1.2 TUTORIAL flag wrong | `docs/TUTORIAL.md` `--name=node-4` → `--ip=10.0.0.5` | Reading the doc; matches the code's actual flag. |
 
+## Round 2 — adversarial QA across 2.6 + 2.5 N=4
+
+Drilled on 2.6 N=4 first (post Round-1 fixes), then teardown +
+deploy 2.5 N=4 + drill the same matrix plus 2.5-specific paths.
+
+### What works (validated this round)
+
+| Category | Result |
+|---|---|
+| 10K-row insert + index + load + ANN top-5 (2.6 N=4) | 2.8s insert + 3.8s load + 6.8ms search |
+| `remove-node --ip=` 4→3 with rolling MinIO sweep on **shrink** | 93s sequenced, 31s/peer; cluster green after; no data loss to existing collections |
+| `WATCHDOG_MODE=monitor` toggle | env var passthrough lands; banner shows `mode=monitor`; on unhealthy container, daemon logs `... unhealthy for N ticks (mode=monitor; not restarting)` and does NOT call docker restart |
+| 2.5 mixcoord active-standby on N=4 | All 4 coords (root/data/query/index) promoted within ~1.1s of leader-mixcoord stop. m2 took rootcoord+datacoord+indexcoord; m3 took querycoord. |
+| 2.5 Pulsar SPOF (PULSAR_HOST kill) | Confirmed — pymilvus connect hangs while pulsar is down, restores when pulsar comes back. Documented limitation. |
+| `secrets.compare_digest` + leader 307 redirects | Round 1 findings still hold; no regression. |
+
+### New findings — Round 2
+
+| ID | Severity | Symptom |
+|---|---|---|
+| F-A.1 | **wart** | `export-backup --to=/tmp/foo` writes to the **leader's** filesystem, not the invoking peer's. The job runs leader-only, and the bind-mounted /tmp inside the daemon is the leader's host /tmp. Operator on m1 expecting the file at m1:/tmp/foo finds it on m3 (current leader). Mitigation: document; or auto-rsync back to invoking peer. |
+| F-A.2 | **wart** | `restore-backup --rename=A:B` only re-maps collection A. If the backup contains other collections (B, C, …), milvus-backup tries to restore each at its original name; if any of those names already exist in the cluster, restore fails with `collection already exist`. The CLI doesn't pass milvus-backup's `--filter` flag through, so an operator can't scope to "just A". |
+| F-A.3 | **bug** | `restore-backup --drop-existing` is silently a no-op in distributed mode. The bash CLI's `_restore_drop_existing` requires pymilvus, which isn't installed in the daemon image (`ModuleNotFoundError: No module named 'pymilvus'`). The CLI skips with a `warn` that's invisible inside the daemon's log capture. The subsequent restore fails with `collection already exist`. Fix: ship pymilvus in the daemon image, or use Milvus's REST API for drop_collection. |
+| F-Phase2.1 | **bug** | Three simultaneous `./milvus-onprem join` calls (parallel SSH from a script) → only the first succeeds; the others silently fail to even write `cluster.env` on the joining peer. The leader's `_join_lock` serializes correctly, but the joiner-side `curl --max-time 60` (lib/cmd_join.sh) appears to time out before the lock releases. The shell `2>&1 | tail -2 &` background pattern hides the error from the caller. **Workaround**: run joins sequentially. **Fix candidates**: bump joiner-side curl timeout to 300s; have the leader respond fast (issue an etcd-reservation upfront, do the heavy work async, return success); or have the joiner detect the timeout and retry. |
+| F-Phase1.D | **wart** | Dangling docker images accumulate when the daemon image is rebuilt (e.g. during patch cycles). Saw 2 layers totaling ~672MB after a busy QA day. `docker image prune -f` handles it; could be a `milvus-onprem maintenance` subcommand that cleans dangling images and trims old job-state in etcd. |
+| F-Phase1.C | **doc-gap** | `milvus-etcd` and `milvus-nginx` have NO docker healthchecks defined in either 2.5 or 2.6 templates. If the etcd or nginx process inside one of those containers crashes WITHOUT the container fully exiting (rare but possible — segfault in a thread that's caught), our watchdog can't see "unhealthy" and can't auto-restart. Fix: add TCP healthchecks for both (etcd `/dev/tcp/localhost/${ETCD_CLIENT_PORT}`, nginx `/dev/tcp/localhost/${NGINX_LB_PORT}`) — same `bash -c "echo > /dev/tcp/..."` pattern we use for 2.5 milvus-* workers. |
+
+### Misconceptions corrected
+
+| Earlier guess | Reality |
+|---|---|
+| "`docker kill` should fire `restart: always`" | False. Docker docs and observed behavior confirm: user-initiated stops/kills do NOT trigger `restart: always`. The policy fires only on unexpected exits (process crash inside container). |
+
 ## Known limitations (not fixed in this pass)
 
 | ID | What it is | Why deferred |
