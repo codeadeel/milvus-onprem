@@ -114,6 +114,51 @@ where N is the 1-based position of this node's IP in PEER_IPS.
 
 ---
 
+## Scale-out / add-node issues
+
+### `CLUSTER_SIZE=N invalid: must be 1 (standalone) or odd ≥3` after add-node
+
+Symptom: you run `add-node` to grow 3→4 (or 5→6), then `status` /
+`bootstrap` / `join --existing` on any peer dies with:
+
+```
+ERROR CLUSTER_SIZE=4 invalid: must be 1 (standalone) or odd ≥3 (3, 5, 7, 9). PEER_IPS=...
+```
+
+Cause: previously, `lib/role.sh:role_validate_size` enforced "odd
+only" on every command. That's correct as an *init-time* user-config
+rule (you wouldn't deploy a 4-node cluster from scratch — even
+sizes have worse Raft tolerance than the next-lower odd) — but
+wrong as a *runtime* rule, because scale-out **must** transit
+through even sizes (etcd member-add is one-at-a-time).
+
+Fix: `role_validate_size` now allows any size ≥ 1, and prints a
+WARN line on even sizes pointing the operator at "plan another
+add-node to reach the next odd size." The init-time odd-only rule
+is unchanged (still enforced in `cmd_init.sh:50`).
+
+If you're hitting this on an older clone, `git pull` to pick up
+the fix, or apply this patch by hand to `lib/role.sh`:
+
+```bash
+role_validate_size() {
+  case "$CLUSTER_SIZE" in
+    1) return 0 ;;
+    [0-9]|[0-9][0-9])
+      if (( CLUSTER_SIZE < 1 )); then
+        die "CLUSTER_SIZE=$CLUSTER_SIZE invalid"
+      fi
+      if (( CLUSTER_SIZE % 2 == 0 )); then
+        warn "CLUSTER_SIZE=$CLUSTER_SIZE is even — transient mid-scale-out state"
+      fi
+      return 0 ;;
+    *) die "CLUSTER_SIZE=$CLUSTER_SIZE invalid" ;;
+  esac
+}
+```
+
+---
+
 ## Bootstrap / lifecycle issues
 
 ### `bootstrap`: stays in Stage 3 with `MinIO cluster health` warnings

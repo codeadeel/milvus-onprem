@@ -76,12 +76,25 @@ _role_resolve_pulsar_host_ip() {
   export PULSAR_HOST_IP
 }
 
-# Reject even-numbered cluster sizes (no Raft quorum). Allow 1 (standalone).
+# Validate runtime cluster size. The "odd-only" rule is enforced at init
+# time (cmd_init.sh) — by the time we get here, an even size is necessarily
+# a transient mid-scale-out state (e.g. 3 -> 4 between add-node and the
+# next add-node that takes us to 5). Raft tolerates floor(N/2)+1 quorum
+# at any N >= 1; even is just a worse capacity-planning point, not broken.
+# So we allow it with a warning, and only die on size 0 or negative.
 role_validate_size() {
   case "$CLUSTER_SIZE" in
-    1)         return 0 ;;
-    3|5|7|9)   return 0 ;;
-    *)         die "CLUSTER_SIZE=$CLUSTER_SIZE invalid: must be 1 (standalone) or odd ≥3 (3, 5, 7, 9). PEER_IPS=$PEER_IPS" ;;
+    1) return 0 ;;
+    [0-9]|[0-9][0-9])
+      if (( CLUSTER_SIZE < 1 )); then
+        die "CLUSTER_SIZE=$CLUSTER_SIZE invalid: must be >= 1. PEER_IPS=$PEER_IPS"
+      fi
+      if (( CLUSTER_SIZE % 2 == 0 )); then
+        warn "CLUSTER_SIZE=$CLUSTER_SIZE is even — transient mid-scale-out state? Raft tolerates this but capacity is worse than the next-lower odd size. Plan another add-node to reach the next odd size."
+      fi
+      return 0
+      ;;
+    *) die "CLUSTER_SIZE=$CLUSTER_SIZE invalid: must be a positive integer. PEER_IPS=$PEER_IPS" ;;
   esac
 }
 
