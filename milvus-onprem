@@ -51,15 +51,20 @@ Usage: milvus-onprem <command> [options]
   join             (other peers) Fetch cluster.env from bootstrap node and bootstrap.
                    Pass --existing to join a cluster that's already running.
 
-  add-node         (existing peer) Add a new Nth node to a running cluster:
-                   etcd member-add + local cluster.env update + nginx reload.
-  update-peers     (other existing peers) Propagate the new PEER_IPS locally
-                   after add-node has updated the orchestrator's cluster.env.
+  add-node         (legacy, pre-control-plane) Add a node via etcd member-add.
+                   For MODE=distributed, just run `join` on the new VM instead.
+  update-peers     (legacy) Propagate updated PEER_IPS to existing peers.
+                   Auto-handled by the daemon's topology watch in distributed mode.
+  remove-node      Gracefully remove a peer: drain MinIO pool, etcd
+                   member-remove, topology delete. Distributed mode only.
 
   backup-etcd      Snapshot the local etcd store to a .db file.
   create-backup    Take a milvus-backup snapshot of the live data (stored in MinIO).
   export-backup    Copy a backup from MinIO to a filesystem dir (USB / NFS / off-site).
   restore-backup   Import a milvus-backup snapshot (use --load to make queryable).
+  jobs             Manage daemon-orchestrated jobs:
+                     jobs list [--state=...] / jobs show <id> / jobs cancel <id>
+                     jobs types     (registered worker types)
 
   smoke            Run the end-to-end smoke test (replica_number auto-derived).
   version          Show CLI + configured-cluster version info.
