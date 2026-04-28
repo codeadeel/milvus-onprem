@@ -43,7 +43,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY __init__.py /app/daemon/
 COPY config.py etcd_client.py leader.py topology.py joining.py handlers.py jobs.py auth.py api.py main.py /app/daemon/
 # Workers register handlers at import time; the package layout matches
-# the source tree so /app/daemon/workers/__init__.py loads them.
+# the source tree so /app/daemon/workers/__init__.py loads them. Includes
+# create_backup, export_backup, restore_backup, backup_etcd, remove_node,
+# version_upgrade.
 COPY workers/ /app/daemon/workers/
 
 EXPOSE 19500

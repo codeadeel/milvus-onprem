@@ -108,6 +108,7 @@ main() {
     restore-backup)  cmd_restore_backup  "$@" ;;
     jobs)            cmd_jobs            "$@" ;;
     remove-node)     cmd_remove_node     "$@" ;;
+    upgrade)         cmd_upgrade         "$@" ;;
     smoke)           cmd_smoke           "$@" ;;
     version)         cmd_version         "$@" ;;
     urls)            cmd_urls            "$@" ;;

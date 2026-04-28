@@ -347,3 +347,56 @@ async def cancel_job(job_id: str, request: Request) -> dict[str, Any]:
     """Best-effort cancel. Returns whether the running task was found."""
     cancelled = await request.app.state.jobs.cancel(job_id)
     return {"job_id": job_id, "cancelled": cancelled}
+
+
+# ─── Internal: rolling upgrade per-peer self-execute ────────────────
+
+
+class UpgradeSelfRequest(BaseModel):
+    """Body for `POST /upgrade-self`. Sent by the leader's
+    version-upgrade worker to each follower in turn."""
+
+    milvus_version: str = Field(..., description="Target image tag, e.g. v2.5.5.")
+
+
+class UpgradeSelfResponse(BaseModel):
+    """Body returned from `POST /upgrade-self` once the local upgrade
+    has either succeeded or failed."""
+
+    log: list[str]
+    error: str | None = None
+
+
+@router.post(
+    "/upgrade-self",
+    dependencies=[Depends(require_token)],
+    tags=["internal"],
+    response_model=UpgradeSelfResponse,
+)
+async def post_upgrade_self(req: UpgradeSelfRequest, request: Request) -> Any:
+    """Execute the local upgrade procedure. Called by the leader's
+    version-upgrade orchestrator on each follower in turn — the
+    follower runs the same steps the leader ran on itself (update
+    cluster.env, render, pull, force-recreate, wait-healthy) and
+    returns a structured log + optional error so the leader can
+    surface peer-specific failures back to the operator.
+
+    Auth-gated by the cluster bearer token; not meant to be called
+    by operators directly. The peer-to-peer model exists because
+    Docker doesn't expose remote control without out-of-band auth
+    (TLS + mTLS, which we deliberately avoid in v1.2)."""
+    # Lazy import: avoids a daemon → workers → daemon cycle at module load.
+    from .workers.version_upgrade import upgrade_self
+
+    captured: list[str] = []
+
+    def writer(line: str) -> None:
+        captured.append(line.rstrip("\n"))
+
+    try:
+        await upgrade_self(writer, req.milvus_version)
+        return UpgradeSelfResponse(log=captured, error=None)
+    except Exception as e:
+        log.exception("upgrade-self failed")
+        captured.append(f"ERROR: {type(e).__name__}: {e}")
+        return UpgradeSelfResponse(log=captured, error=f"{type(e).__name__}: {e}")
