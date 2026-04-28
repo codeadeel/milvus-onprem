@@ -119,8 +119,10 @@ For the full walkthrough with diagrams, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT
   (`init` / `pair` / `join` / `bootstrap`), day-2 (`status` / `wait` /
   `up` / `down` / `ps` / `logs` / `urls` / `version` / `smoke`), backup
   (`create-backup` / `export-backup` / `restore-backup` / `backup-etcd`),
-  scale-out (`add-node` / `update-peers`), system install
-  (`install --with-watchdog` / `uninstall`), and `teardown`.
+  scale-out (`add-node` / `update-peers`), version upgrades
+  (`upgrade --milvus-version=…`), node removal (`remove-node`), job
+  inspection (`jobs list/show/cancel`), system install / uninstall,
+  and `teardown`.
 - **N-node from day 1** — 1 (standalone), 3, 5, 7, 9. Even sizes are
   rejected (no Raft quorum).
 - **Auto-failover for single-VM loss** — etcd Raft handles it, no
@@ -129,8 +131,12 @@ For the full walkthrough with diagrams, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT
   cluster (etcd member-add + cluster.env propagation +
   `join --existing`). MinIO server-list change is operator-coordinated
   rolling restart; the rest is automated.
-- **Watchdog** — opt-in alert-mode poller (systemd unit) that emits
-  `PEER_DOWN_ALERT` / `PEER_UP_ALERT` to journald when a peer drops.
+- **Built-in watchdog** — runs inside the control-plane daemon (no
+  extra install step). Auto-restarts unhealthy local `milvus-*`
+  containers (loop-guarded so a stuck container doesn't get hammered)
+  and emits structured `PEER_DOWN_ALERT` / `PEER_UP_ALERT` /
+  `COMPONENT_RESTART` / `COMPONENT_RESTART_LOOP` lines greppable from
+  `docker logs milvus-onprem-cp`. See [docs/CONFIG.md § Watchdog](docs/CONFIG.md#watchdog).
 - **Multi-version Milvus** — ships templates for 2.6.x (default,
   Woodpecker WAL) and 2.5.x (coord-mode-cluster + Pulsar singleton).
   Switch by changing `MILVUS_IMAGE_TAG` in cluster.env. Future versions

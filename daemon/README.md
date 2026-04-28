@@ -1,24 +1,47 @@
 # milvus-onprem control plane daemon
 
-FastAPI daemon, one per node, leader-elected via etcd. Stage 2 ships
-the scaffold (leader election + topology watch + minimum read-only
-endpoints). Subsequent stages add `/join`, jobs, backup/restore/upgrade
-endpoints.
+FastAPI daemon, one per node, leader-elected via etcd. Owns the full
+v1.2 surface: leader election, topology watch, `/join`, the jobs
+abstraction (`create-backup` / `restore-backup` / `remove-node` /
+`version-upgrade`), and the watchdog (local component auto-restart +
+peer reachability alerts).
 
 See `docs/CONTROL_PLANE.md` for the full design.
+
+```mermaid
+flowchart LR
+  subgraph daemon["control-plane daemon (one per peer)"]
+    L[Leader elector<br/>etcd lease]
+    T[Topology watcher<br/>/cluster/topology/peers/]
+    J[Jobs manager<br/>/cluster/jobs/]
+    W1[Local component watchdog]
+    W2[Peer reachability watchdog]
+    A[FastAPI routes<br/>/health /join /jobs /status …]
+  end
+  L --> J
+  T --> H[Handlers: render + nginx + MinIO]
+  W1 -. docker restart .-> sib[(milvus-* containers)]
+  W2 -. TCP probe :19500 .-> peers[(peer daemons)]
+  A -. routes write ops to leader via 307 .-> L
+```
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `main.py` | FastAPI app + lifespan + uvicorn entrypoint |
-| `config.py` | Env-var-driven config (pydantic-settings) |
+| `main.py` | FastAPI app + lifespan + uvicorn entrypoint; wires all background tasks |
+| `config.py` | Env-var-driven config (pydantic-settings) — incl. watchdog knobs |
 | `etcd_client.py` | Async wrapper over the etcd v3 HTTP gateway (lease, kv, txn, watch) |
 | `leader.py` | Leader election via etcd lease + atomic create |
 | `topology.py` | Watches `/cluster/topology/peers/`, fans out events to handlers |
+| `handlers.py` | Topology-change reactions: render templates + nginx reload + MinIO pool ops |
+| `joining.py` | Leader-side `/join` orchestration (token check, name allocation, etcd member-add) |
+| `jobs.py` | Long-running job lifecycle (etcd-backed state, leader-resumable) |
+| `workers/` | Per-job-type code (`create_backup`, `export_backup`, `restore_backup`, `backup_etcd`, `remove_node`, `version_upgrade`) |
+| `watchdog.py` | `LocalComponentWatchdog` + `PeerReachabilityWatchdog` (Stage 12) |
 | `auth.py` | Bearer-token middleware |
-| `api.py` | HTTP routes (`/health`, `/version`, `/leader`, `/topology`) |
-| `Dockerfile` | Container build (python:3.12-slim base + curl for healthcheck) |
+| `api.py` | HTTP routes (`/health`, `/version`, `/leader`, `/topology`, `/jobs`, `/join`, `/status`, `/urls`, `/upgrade-self`) |
+| `Dockerfile` | Container build (python:3.12-slim base + docker CLI + compose plugin + curl) |
 | `requirements.txt` | Pinned deps |
 
 ## Configuration
@@ -85,5 +108,15 @@ leadership (lease=...)`.
 - Kill the daemon container while it's leader; the etcd lease expires
   in ~15s. A re-launched daemon takes over without manual cleanup.
 - Block egress from one of two daemons in a multi-daemon test; the
-  watcher reconnects automatically. (Stage 7 will validate this on
-  real 4-VM hardware.)
+  watcher reconnects automatically.
+- **Watchdog drill — local auto-restart.** Spawn a throwaway
+  `milvus-test` container with a deliberately failing healthcheck
+  (`docker run -d --name milvus-test --health-cmd 'exit 1'
+  --health-interval=5s alpine sleep 1d`); after 3 ticks (~30s) the
+  daemon log emits `COMPONENT_RESTART attempt=1`, then 2 and 3, then
+  `COMPONENT_RESTART_LOOP` and backs off. `docker rm -f milvus-test`
+  to clean up.
+- **Watchdog drill — peer down.** `docker stop milvus-onprem-cp` on
+  any peer; from another peer's `docker logs milvus-onprem-cp`, a
+  `PEER_DOWN_ALERT` fires after 6 ticks (~60s). `docker start` it
+  back; `PEER_UP_ALERT was_down_for_s=N` follows on the next probe.

@@ -556,18 +556,34 @@ are non-goals per §2. Below is the concrete breakdown.
   pool decommission → nginx update on all peers.
 - Idempotent retry / resume on leader failover mid-job.
 
-### v1.2 (rolling Milvus upgrade + alert-only watchdog)
+### v1.2 (rolling Milvus upgrade + watchdog) — SHIPPED
+
 - **Rolling Milvus upgrade** via `upgrade --milvus-version=X`:
   daemon pulls new image on every peer, rolling-restarts one at a
   time, waits healthy, repeats. Aborts on health-check failure
   mid-upgrade and stops at the last known-good peer (operator
   decides next steps).
-- **Alert-only watchdog.** Each daemon polls peer reachability;
-  leader emits structured `PEER_DOWN` / `PEER_UP` events to
-  journald (and optionally a webhook). **No auto-action** —
-  alerts give the operator visibility, the operator decides what
-  to do. This replaces the existing `lib/watchdog.sh` systemd
-  unit; same alert format.
+- **Watchdog integrated into the daemon.** Two background tasks
+  per daemon (no systemd unit, no install step):
+  - **Local component watchdog** — polls `docker ps` on this host,
+    auto-restarts `milvus-*` containers stuck in `(unhealthy)`.
+    Loop-guarded (3 restarts in 5min → back off). `auto` mode is
+    default; `monitor` mode keeps the alerts but skips the action.
+  - **Peer reachability watchdog** — TCP-probes peers on `:19500`
+    every tick; emits `PEER_DOWN_ALERT` / `PEER_UP_ALERT`. Alerts
+    only — etcd Raft + nginx LB recover automatically.
+- **2.5 mixcoord active-standby.** `templates/2.5/milvus.yaml.tpl`
+  ships `enableActiveStandby: true` for all 4 coords. Without this
+  the loser of the etcd CAS panics at `session_util.go:318` and
+  docker `restart: always` crash-loops the standby mixcoords
+  forever; with it, sub-second standby promotion on coord failover
+  (drilled at 483ms on 3-node hardware).
+- **2.5 per-component healthchecks.** Each `milvus-*` container in
+  the 2.5 topology gets a healthcheck (mixcoord curl-on-9091
+  replaced with TCP-probe-on-53100 because /healthz is leader-only;
+  4 workers TCP-probe their gRPC port via bash `/dev/tcp`). Without
+  these, the local watchdog can never see them as `(unhealthy)`
+  (default = `health=none`) and would never auto-restart them.
 
 ### Things still needing the operator (by design)
 
@@ -591,9 +607,9 @@ are non-goals per §2. Below is the concrete breakdown.
 | 8 | Jobs abstraction + `create-backup`, `restore-backup`, `backup-etcd`, `list-backups`, `jobs list/show/cancel` (v1.1) | Backup pipeline works via control plane. |
 | 9 | `remove-node` job (v1.1) | Cluster shrink. |
 | 10 | **v1.1 validation** — backup-and-restore, scale up + down on 4 VMs | v1.1 ships. |
-| 11 | `upgrade --milvus-version=X` rolling (v1.2) | In-place version upgrade. |
-| 12 | Alert-only watchdog integrated into daemon, structured PEER_DOWN/UP events (v1.2) | Operator gets visibility on peer failure. |
-| 13 | **v1.2 validation** — upgrade drill, watchdog drill | v1.2 ships. |
+| 11 | `upgrade --milvus-version=X` rolling (v1.2) ✅ | In-place version upgrade. |
+| 12 | Watchdog integrated into daemon, COMPONENT_RESTART/PEER_DOWN/UP events, loop guard (v1.2) ✅ | Local auto-restart on hung components + peer-down visibility. |
+| 13 | **v1.2 validation** — upgrade drill, watchdog drill on 2.5 + 2.6, mixcoord active-standby fix ✅ | v1.2 shipped. |
 
 Each stage is one commit (or two — code + validation evidence).
 After Stage 7 (v1 ships) we have a working cluster meeting the

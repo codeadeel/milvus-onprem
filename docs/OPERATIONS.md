@@ -409,18 +409,25 @@ docker logs --tail 200 milvus
 docker logs --tail 200 milvus-nginx
 ```
 
-Watchdog (running as a systemd service after
-`milvus-onprem install --with-watchdog`):
+Watchdog (runs inside the daemon container — no install step):
 
 ```bash
-sudo journalctl -u milvus-watchdog -f | grep PEER_
-sudo journalctl -u milvus-watchdog --since "10 minutes ago"
+docker logs -f milvus-onprem-cp 2>&1 | grep -E 'PEER_(DOWN|UP)_ALERT|COMPONENT_'
+docker logs --since 10m milvus-onprem-cp 2>&1 | grep COMPONENT_
 ```
 
-Alert format is `PEER_DOWN_ALERT` / `PEER_UP_ALERT` followed by
-space-separated `key=value` pairs (`ts`, `node`, `ip`, `mode`,
-`consecutive_failures`, plus `was_down_for_s` on recovery) — easy to
-grep, easy to feed into a log shipper or alerting rule.
+Four single-line, greppable, parses-to-dict alerts:
+
+```
+PEER_DOWN_ALERT        ts=<unix> node=<name> ip=<ip> consecutive_failures=N
+PEER_UP_ALERT          ts=<unix> node=<name> ip=<ip> was_down_for_s=N
+COMPONENT_RESTART      ts=<unix> container=<name> reason=unhealthy attempt=N
+COMPONENT_RESTART_LOOP ts=<unix> container=<name> restarts_in_5m=N
+```
+
+When `COMPONENT_RESTART_LOOP` fires the daemon stops auto-restarting
+the looping container and leaves it for the operator (3 restarts in
+5min is a sign of a misconfiguration, not a transient blip).
 
 For deeper Milvus debugging, edit `templates/<version>/milvus.yaml.tpl`
 and set `log.level: debug`, then `render && up`. Be prepared for a lot

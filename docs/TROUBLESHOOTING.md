@@ -36,6 +36,37 @@ If you previously initialised with the single-`milvus`-container
 template, `teardown --full --force` and re-run `init` against the
 current `templates/2.5/`.
 
+### Milvus 2.5: `milvus-mixcoord` panics with `panic: function CompareAndSwap error ... for key: querycoord` (multi-mixcoord cycle)
+
+Different shape from the `milvus run standalone` case above. This one
+fires from `internal/util/sessionutil/session_util.go:318` during
+`(*Session).Register`. Symptom: in a 3-node 2.5 cluster, ONE node's
+`milvus-mixcoord` is stable and the other two ratchet up
+`docker inspect milvus-mixcoord --format '{{.RestartCount}}'`
+indefinitely.
+
+Cause: `enableActiveStandby` defaults to `false` upstream. When
+mixcoord N+1 starts and tries to register at
+`by-dev/meta/session/<coord>`, the etcd CompareAndSwap returns
+`compare=false` (key already held by the leader); the session
+helper hits the 30-retry budget and PANICS rather than entering
+standby mode. `restart: always` re-launches it; same fate; loop.
+
+The cluster *appears* to work because the data-plane workers
+(querynode/datanode/indexnode/proxy) use suffixed session keys
+(`querynode-NNN`) that don't collide. But there's no warm standby
+mixcoord — if the live leader dies, coord-down for many seconds
+until docker happens to restart-cycle a survivor into the slot.
+
+Fix shipped in `templates/2.5/milvus.yaml.tpl`: set
+`enableActiveStandby: true` on `rootCoord`, `dataCoord`, `queryCoord`,
+and `indexCoord`. Re-render and `docker restart milvus-mixcoord` on
+each peer (rolling: hit the standbys first, then the active leader).
+
+After the fix, m1+m2+m3 each run mixcoord in either ACTIVE or STANDBY
+state per coord; the 4 coord roles are independently elected (leader
+can be split across nodes). Failover drilled at <500ms.
+
 ### `init`: `--peer-ips is required`
 
 You ran `init` with no flags. Pass at least `--peer-ips`:
@@ -649,6 +680,47 @@ small clusters.
 If `05_prove_replication.py` shows a peer returning fewer rows than
 the others, that's MinIO heal still in flight. Wait a few minutes
 on small datasets, longer on large ones, and re-run.
+
+### `COMPONENT_RESTART_LOOP` fired in daemon logs — what to do
+
+The local watchdog auto-restarted a `milvus-*` container 3 times
+within a 5-minute window, then backed off:
+
+```
+COMPONENT_RESTART_LOOP ts=<unix> container=<name> restarts_in_5m=3
+```
+
+After this fires the daemon stops auto-restarting that container
+and emits a `WARNING ... in restart loop ... — leaving alone for
+operator` once per tick. This is by design — three restarts in five
+minutes means the unhealthy state is sticky (config bug, missing
+dependency, OOM in a tight loop, port conflict). Restarting harder
+amplifies the noise.
+
+```mermaid
+flowchart LR
+  A[container unhealthy] -- 3 ticks --> R1[COMPONENT_RESTART attempt=1]
+  R1 -- still unhealthy --> R2[COMPONENT_RESTART attempt=2]
+  R2 -- still unhealthy --> R3[COMPONENT_RESTART attempt=3]
+  R3 --> L[COMPONENT_RESTART_LOOP — back off]
+  L --> O[operator inspects]
+  O -- fix root cause --> F[docker restart manually]
+  F -- healthy --> N[loop alerted state cleared on next healthy tick]
+```
+
+What to do:
+
+1. `docker logs --tail 200 <container>` — figure out *why* unhealthy.
+2. Fix the root cause: bad mount, bad config, OOM (`docker stats`),
+   port collision (`ss -tlnp | grep <port>`), missing dependency
+   (`milvus-etcd` / `milvus-pulsar` / etc.).
+3. `docker restart <container>` to clear it manually. Once the
+   container reaches `(healthy)` the loop-alerted flag clears
+   automatically; the watchdog will resume normal monitoring.
+
+If the loop guard tripped on `milvus-mixcoord` specifically, see the
+2.5 mixcoord active-standby section above — that was the most common
+trigger before we shipped `enableActiveStandby: true`.
 
 ### Reads fail with `code=106 collection on recovering` after a node restart
 

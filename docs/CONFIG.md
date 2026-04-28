@@ -132,15 +132,47 @@ Or edit cluster.env directly. After any port change, every peer needs
 
 ## Watchdog
 
-| Variable | Required | Default | Notes |
-|---|---|---|---|
-| `WATCHDOG_MODE` | Yes | `monitor` | `monitor` (alert-only) or `auto` (would fire automatic failover; not yet implemented for N-node since etcd's own Raft handles failover). |
-| `WATCHDOG_INTERVAL_S` | No | `5` | Seconds between peer probes. |
-| `WATCHDOG_FAILURE_THRESHOLD` | No | `6` | Consecutive failed probes before alerting. Default = 30s window. |
+The watchdog runs **inside the control-plane daemon container** (one
+per peer). No separate systemd unit. Two background tasks:
 
-In v0, the watchdog is alert-only: it logs to journal when a peer is
-unreachable. With proper N-node Raft quorum, the *cluster* recovers
-automatically — the watchdog exists for *visibility*, not failover.
+- **Local component watchdog** — polls `docker ps` on this host, finds
+  `milvus-*` containers in `(unhealthy)` state, and after N consecutive
+  ticks `docker restart`s them. Loop-guarded: 3+ restarts in a 5-minute
+  window stops the auto-restart and emits `COMPONENT_RESTART_LOOP` so
+  the operator can inspect rather than amplify a misconfigured restart
+  pile. Only acts on this host's containers; cross-peer remediation
+  needs out-of-band SSH/agent which we deliberately don't have.
+- **Peer reachability watchdog** — TCP-probes every other peer's
+  control-plane port (`:19500`). Consecutive misses past threshold
+  emit a structured `PEER_DOWN_ALERT`; recovery emits `PEER_UP_ALERT`
+  with `was_down_for_s`. Alerts only — no remediation, since etcd's
+  own Raft + nginx LB recover automatically; the watchdog exists for
+  *visibility*.
+
+All knobs are loaded from `MILVUS_ONPREM_WATCHDOG_*` env vars via
+pydantic settings — the defaults below are baked into
+`daemon/config.py`. Override at the daemon level (edit the rendered
+docker-compose `control-plane` service `environment:` block, then
+`docker compose up -d --force-recreate --no-deps control-plane`).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `MILVUS_ONPREM_WATCHDOG_MODE` | `auto` | `auto` = restart unhealthy local containers; `monitor` = alerts only, no action. |
+| `MILVUS_ONPREM_WATCHDOG_INTERVAL_S` | `10` | Tick interval (local + peer probes share it). |
+| `MILVUS_ONPREM_WATCHDOG_UNHEALTHY_THRESHOLD` | `3` | Consecutive unhealthy ticks before auto-restart fires (default ≈ 30s). |
+| `MILVUS_ONPREM_WATCHDOG_PEER_FAILURE_THRESHOLD` | `6` | Consecutive peer-probe failures before `PEER_DOWN_ALERT` (default ≈ 60s). |
+| `MILVUS_ONPREM_WATCHDOG_RESTART_LOOP_WINDOW_S` | `300` | Window in which the loop-guard counts restarts (5 min). |
+| `MILVUS_ONPREM_WATCHDOG_RESTART_LOOP_MAX` | `3` | Max auto-restarts per container in the loop window before emitting `COMPONENT_RESTART_LOOP` and backing off. |
+
+Alert lines are single-line and parse straight to a dict
+(`docker logs milvus-onprem-cp | grep -E 'PEER_(DOWN|UP)_ALERT|COMPONENT_'`):
+
+```
+COMPONENT_RESTART      ts=<unix> container=<name> reason=unhealthy attempt=N
+COMPONENT_RESTART_LOOP ts=<unix> container=<name> restarts_in_5m=N
+PEER_DOWN_ALERT        ts=<unix> node=<name> ip=<ip> consecutive_failures=N
+PEER_UP_ALERT          ts=<unix> node=<name> ip=<ip> was_down_for_s=N
+```
 
 ---
 
@@ -188,7 +220,7 @@ Some changes need extra steps:
 | `MILVUS_IMAGE_TAG` (cross-major) | Plan a migration. Cross-major upgrades require milvus-backup → drop → restore. See [OPERATIONS.md](OPERATIONS.md). |
 | `MILVUS_IMAGE_TAG` (same major.minor patch) | Just `render && up`; safe. |
 | `PEER_IPS` | Tear down + redeploy. Re-numbering existing nodes mid-life is unsupported. |
-| `WATCHDOG_*` | `sudo systemctl restart milvus-watchdog` (after `milvus-onprem install --with-watchdog`). |
+| `MILVUS_ONPREM_WATCHDOG_*` | Edit `rendered/<node>/docker-compose.yml` `control-plane` service env, then `docker compose up -d --force-recreate --no-deps control-plane` on each peer. |
 
 ---
 

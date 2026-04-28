@@ -71,10 +71,24 @@ The structure is the same as 2.6 with one addition: **a Pulsar singleton
 on the PULSAR_HOST node**. All Milvus instances on all nodes connect to
 this single broker for the message queue.
 
-Containers per node:
+The "Milvus 2.5" box in the diagram is actually 5 sibling containers
+per node (`milvus-mixcoord`, `milvus-proxy`, `milvus-querynode`,
+`milvus-datanode`, `milvus-indexnode`) — Milvus 2.5 doesn't run
+multi-instance HA in single-binary `milvus run standalone` mode, so
+each role is its own container. See "Why coord-mode-cluster" below.
 
-- **node-1 (PULSAR_HOST):** etcd, MinIO, Milvus, nginx, **Pulsar** (5 total)
-- **node-2 ... node-N:** etcd, MinIO, Milvus, nginx (4 total — same as 2.6)
+Containers per node (coord-mode-cluster topology):
+
+- **node-1 (PULSAR_HOST):** etcd, MinIO, mixcoord, proxy, querynode,
+  datanode, indexnode, nginx, control-plane daemon, **Pulsar**
+  (10 total)
+- **node-2 ... node-N:** same minus Pulsar (9 total)
+
+The mixcoord containers run all 4 coords (rootcoord/datacoord/
+querycoord/indexcoord) co-resident with `enableActiveStandby: true`
+on each — the loser of the etcd-CAS leader election watches the
+lease and promotes on TTL expiry. Drilled <500ms failover on
+3-node hardware. See [docs/FAILOVER.md § 2.5 mixcoord active-standby](../../docs/FAILOVER.md).
 
 ## SPOF caveat: the Pulsar singleton
 
@@ -112,7 +126,7 @@ Woodpecker, where this whole problem disappears.)
 
 | Milvus version | Status |
 |---|---|
-| `v2.5.4` (default) | **Untested in this build** — templates derived from milvusDeploy patterns + Milvus 2.5 config schema. Please file issues if you hit them. |
+| `v2.5.4` (default) | **Validated end-to-end on real hardware** — 3-node bootstrap, smoke + 10-step tutorial + cross-peer replication-proof, mixcoord active-standby (<500ms failover drill), per-component healthchecks + watchdog auto-restart drill, Pulsar pre-flight + skip_flush path, backup round-trip incl. cross-version 2.5→2.6, rolling upgrade drill. |
 | Other 2.5.x patches | Untested. Patch-level upgrades expected to work; bump `MILVUS_IMAGE_TAG` and re-render. |
 
 ## What changes between 2.5 and 2.6
@@ -120,9 +134,9 @@ Woodpecker, where this whole problem disappears.)
 | Concern | 2.5 | 2.6 |
 |---|---|---|
 | Default WAL / MQ | Pulsar (required) | Woodpecker (embedded, default) |
-| Coordinators | Separate (rootcoord, datacoord, querycoord, indexcoord) | Consolidated into `mixcoord` |
-| Singleton SPOF | Pulsar broker | None (Woodpecker is embedded) |
-| Containers per node | 4 + Pulsar on one | 4 |
+| Coord topology | Per-component containers in mixture mode (`mixcoord` + 4 workers) with `enableActiveStandby: true` on each coord | Single `milvus run standalone` binary per node, coord co-located with workers |
+| Singleton SPOF | Pulsar broker (writes); coord layer is HA via active-standby | None (Woodpecker is embedded) |
+| Containers per node | 9 (or 10 on PULSAR_HOST) | 4 |
 | Cross-version upgrade | Backup + restore (cross-major) | — |
 
 If you're starting fresh, **strongly prefer 2.6** unless you have an

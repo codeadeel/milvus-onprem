@@ -46,16 +46,16 @@ sequenceDiagram
   end
 ```
 
-The watchdog (`milvus-onprem watchdog`, optionally as a systemd unit
-via `install --with-watchdog`) emits a `PEER_DOWN_ALERT` after
-`WATCHDOG_FAILURE_THRESHOLD` consecutive misses (default 6 × 5s = 30s)
-on **any** topology. It is independent of Milvus's own failure
-detection and is purely an alerting loop:
+The watchdog runs **inside the control-plane daemon** on every peer
+(no separate systemd unit) and emits a `PEER_DOWN_ALERT` after the
+`MILVUS_ONPREM_WATCHDOG_PEER_FAILURE_THRESHOLD` consecutive misses
+(default 6 × 10s = 60s) on **any** topology. It is independent of
+Milvus's own failure detection and is purely an alerting loop:
 
 ```mermaid
 flowchart LR
-  A[node-3 unreachable] --> B{6 consecutive<br/>5s probes fail?}
-  B -- yes --> C[PEER_DOWN_ALERT<br/>journald]
+  A[node-3 unreachable] --> B{6 consecutive<br/>10s TCP probes fail?}
+  B -- yes --> C[PEER_DOWN_ALERT<br/>docker logs milvus-onprem-cp]
   B -- no --> A
   C --> D[node-3 reachable again]
   D --> E[PEER_UP_ALERT<br/>was_down_for_s=N]
@@ -124,25 +124,86 @@ reassignment path entirely, so they wouldn't change anything observable.
 
 ## Watchdog observation
 
-The watchdog runs on each peer and alerts when **other** peers stop
-answering on the Milvus port. To observe a node going down:
+The watchdog runs **inside the control-plane daemon container** on
+every peer (no systemd unit, no install step). Two background tasks:
 
-```bash
-# install on every node, alert-only mode
-./milvus-onprem install --with-watchdog
-journalctl -u milvus-watchdog -f | grep PEER_
+```mermaid
+flowchart TB
+  subgraph daemon["control-plane daemon (per peer)"]
+    L[Local component watchdog<br/>polls 'docker ps' every 10s]
+    P[Peer reachability watchdog<br/>TCP-probes peers' :19500 every 10s]
+  end
+  L -- 3 ticks unhealthy --> AR{auto mode?}
+  AR -- yes --> R1[docker restart container<br/>COMPONENT_RESTART attempt=N]
+  R1 -- 3 restarts in 5min --> R2[COMPONENT_RESTART_LOOP<br/>back off, leave to operator]
+  AR -- no/monitor --> M[log warning only]
+  P -- 6 misses --> D[PEER_DOWN_ALERT]
+  P -- recovery --> U[PEER_UP_ALERT was_down_for_s=N]
 ```
 
-A `PEER_DOWN_ALERT` line includes the offline peer's IP, the local
-observer's name, and the consecutive-failure count. A matching
-`PEER_UP_ALERT` fires when the peer comes back, with `was_down_for_s`
-measured from the down-alert time. Both alerts are single-line and
-greppable.
+To observe alerts on any peer:
 
-The watchdog deliberately does not auto-recover — `WATCHDOG_MODE=auto`
-is reserved for future work and currently behaves identically to
-`monitor`. Recovery is operator-driven (bring the node back; the rest
-is automatic).
+```bash
+docker logs -f milvus-onprem-cp 2>&1 | grep -E 'PEER_(DOWN|UP)_ALERT|COMPONENT_'
+```
+
+Alert lines (single-line, parses straight to a dict):
+
+```
+PEER_DOWN_ALERT        ts=<unix> node=<name> ip=<ip> consecutive_failures=N
+PEER_UP_ALERT          ts=<unix> node=<name> ip=<ip> was_down_for_s=N
+COMPONENT_RESTART      ts=<unix> container=<name> reason=unhealthy attempt=N
+COMPONENT_RESTART_LOOP ts=<unix> container=<name> restarts_in_5m=N
+```
+
+`was_down_for_s` measures from the down-alert time, not the actual
+outage start (which is up to `peer_failure_threshold × interval` ≈
+60s earlier).
+
+`MILVUS_ONPREM_WATCHDOG_MODE=monitor` switches off the local
+auto-restart but keeps both the unhealthy detection and all peer
+alerts active. See [CONFIG.md § Watchdog](CONFIG.md#watchdog) for
+the full env-var reference.
+
+## 2.5 mixcoord active-standby (HA at the coord layer)
+
+In a 3-node 2.5 cluster, only ONE mixcoord can hold the singleton
+coord session keys (`by-dev/meta/session/{rootcoord,datacoord,querycoord,indexcoord}`)
+at a time — etcd CompareAndSwap is the leader-election primitive.
+The other two mixcoords need somewhere to wait. Two configs:
+
+```mermaid
+flowchart LR
+  subgraph bad["enableActiveStandby: false (upstream default — DON'T)"]
+    A1[m1 mixcoord<br/>tries CAS] -- wins --> A2[m1 ACTIVE]
+    B1[m2 mixcoord<br/>tries CAS] -- loses --> B2[panic on session_util.go:318]
+    B2 --> B3[docker restart: always]
+    B3 --> B1
+    C1[m3 mixcoord<br/>tries CAS] -- loses --> C2[panic]
+    C2 --> C3[restart loop]
+    C3 --> C1
+  end
+  subgraph good["enableActiveStandby: true (what we ship)"]
+    D1[m1 mixcoord<br/>wins CAS] --> D2[m1 ACTIVE]
+    E1[m2 mixcoord] -- loses --> E2[STANDBY<br/>watch lease]
+    F1[m3 mixcoord] -- loses --> F2[STANDBY<br/>watch lease]
+    D2 -- dies --> X[lease expires]
+    X -- TTL --> E2
+    E2 -. promotes .-> E3[ACTIVE]
+  end
+```
+
+`templates/2.5/milvus.yaml.tpl` ships `enableActiveStandby: true`
+for all four coords. Hardware drill: stopping the active mixcoord
+on m1 promoted m2's standby querycoord to ACTIVE in **483ms**,
+versus the old config's many-second coord-down window. Without this
+flag the cluster *appears* to work because workers are unaffected
+(they use suffixed session keys, no collision), but the control
+plane is a single point of failure.
+
+This setting only applies to 2.5. 2.6's `milvus run standalone`
+binary co-locates coord and worker per node, so there's no separate
+mixcoord to elect.
 
 ## Recovery procedure
 
