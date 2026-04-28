@@ -16,7 +16,7 @@ FROM python:3.12-slim AS base
 #   ca-certificates  for HTTPS curl (download docker / compose)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      curl bash gettext-base ca-certificates \
+      curl bash gettext-base ca-certificates sudo \
  && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI + compose plugin. Both are statically-linked single binaries
@@ -42,6 +42,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Source goes into /app/daemon/ so `python -m daemon.main` works.
 COPY __init__.py /app/daemon/
 COPY config.py etcd_client.py leader.py topology.py joining.py handlers.py jobs.py auth.py api.py main.py /app/daemon/
+# Workers register handlers at import time; the package layout is the
+# same as the source tree so /app/daemon/workers/__init__.py loads them.
 COPY workers/ /app/daemon/workers/
 
 EXPOSE 19500

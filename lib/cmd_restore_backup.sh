@@ -56,6 +56,19 @@ cmd_restore_backup() {
   env_require
   role_detect
 
+  # Distributed mode: route via the daemon's /jobs (recursion-guarded).
+  # Restore needs the backup data physically present on the daemon-host
+  # at $from_path — that's the same host the bash command executes on
+  # in standalone mode, so for v1.1 we keep the same model: operator
+  # places the export tree on whichever node they run the command from.
+  if [[ "${MODE:-standalone}" == "distributed" \
+        && "${MILVUS_ONPREM_INTERNAL:-}" != "1" ]]; then
+    _restore_backup_via_daemon \
+      "$from_path" "$name" "$skip_upload" "$restore_index" \
+      "$drop_existing" "$auto_load"
+    return $?
+  fi
+
   backup_download_binary
 
   # Resolve name
@@ -263,4 +276,39 @@ Typical 100 GB-from-developer scenario:
   cd ~/milvus-onprem
   ./milvus-onprem restore-backup --from ~/dev_backup
 EOF
+}
+
+# POST a restore-backup job to the local daemon and poll until done.
+# Maps the bash flags onto the worker's params dict.
+_restore_backup_via_daemon() {
+  local from_path="$1" name="$2" skip_upload="$3" restore_index="$4"
+  local drop_existing="$5" auto_load="$6"
+  local cp_url="http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}"
+  local token="${CLUSTER_TOKEN:-}"
+  [[ -n "$token" ]] || die "CLUSTER_TOKEN missing in cluster.env"
+
+  local body
+  body=$(python3 -c "
+import json
+p = {}
+if '''$from_path''': p['from'] = '''$from_path'''
+if '''$name''':      p['name'] = '''$name'''
+if int('''$skip_upload''' or '0'):  p['name'] = p.get('name')  # no-op flag carried in 'name' alone
+if int('''$drop_existing''' or '0'): p['drop_existing'] = True
+if int('''$auto_load''' or '0'):     p['load']           = True
+if int('''$restore_index''' or '0') == 0:
+    p['no_restore_index'] = True
+print(json.dumps({'type':'restore-backup','params':p}))
+")
+  info "==> POST /jobs (restore-backup) on $cp_url"
+  local resp
+  resp=$(curl -fsS --location-trusted --max-time 30 \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -d "$body" "$cp_url/jobs") \
+    || die "POST /jobs failed — daemon unreachable?"
+  local job_id
+  job_id=$(printf '%s' "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+  ok "job created: $job_id"
+  _poll_job "$job_id" "$cp_url" "$token"
 }

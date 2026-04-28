@@ -61,6 +61,19 @@ EOF
   env_require
   role_detect
 
+  # Distributed mode: route via the daemon's /jobs (same recursion
+  # guard as create-backup). The bash command runs locally on the
+  # daemon-host (docker exec into milvus-minio, docker cp to the host
+  # path), so the destination path is interpreted on whichever node
+  # the daemon decided to schedule the job — for v1.1 that's always
+  # the leader. Operator should pick a path that exists / makes sense
+  # there; cluster-wide export-to-anywhere is a v1.2 concern.
+  if [[ "${MODE:-standalone}" == "distributed" \
+        && "${MILVUS_ONPREM_INTERNAL:-}" != "1" ]]; then
+    _export_backup_via_daemon "$name" "$to_path"
+    return $?
+  fi
+
   # Cheap pre-flight: verify the backup exists in MinIO before we start
   # creating destination dirs and running mc.
   if ! minio_mc ls "local/milvus-bucket/backup/${name}/" >/dev/null 2>&1; then
@@ -98,4 +111,29 @@ EOF
   info "to delete this backup from MinIO and free space:"
   info "    docker exec milvus-minio mc rm --recursive --force \\"
   info "      local/milvus-bucket/backup/${name}"
+}
+
+# POST an export-backup job to the local daemon and poll until done.
+_export_backup_via_daemon() {
+  local name="$1" to_path="$2"
+  local cp_url="http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}"
+  local token="${CLUSTER_TOKEN:-}"
+  [[ -n "$token" ]] || die "CLUSTER_TOKEN missing in cluster.env"
+
+  local body
+  body=$(python3 -c "
+import json
+print(json.dumps({'type':'export-backup','params':{'name':'$name','to':'$to_path'}}))
+")
+  info "==> POST /jobs (export-backup name=$name to=$to_path) on $cp_url"
+  local resp
+  resp=$(curl -fsS --location-trusted --max-time 30 \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -d "$body" "$cp_url/jobs") \
+    || die "POST /jobs failed — daemon unreachable?"
+  local job_id
+  job_id=$(printf '%s' "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+  ok "job created: $job_id"
+  _poll_job "$job_id" "$cp_url" "$token"
 }

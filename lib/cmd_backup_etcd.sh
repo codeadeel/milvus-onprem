@@ -37,9 +37,36 @@ EOF
   env_require
   role_detect
 
+  # Distributed mode: route via daemon /jobs.
+  if [[ "${MODE:-standalone}" == "distributed" \
+        && "${MILVUS_ONPREM_INTERNAL:-}" != "1" ]]; then
+    _backup_etcd_via_daemon
+    return $?
+  fi
+
   if [[ -n "$output" ]]; then
     etcd_backup "$output"
   else
     etcd_backup
   fi
+}
+
+# POST a backup-etcd job to the local daemon and poll until done.
+_backup_etcd_via_daemon() {
+  local cp_url="http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}"
+  local token="${CLUSTER_TOKEN:-}"
+  [[ -n "$token" ]] || die "CLUSTER_TOKEN missing in cluster.env"
+
+  info "==> POST /jobs (backup-etcd) on $cp_url"
+  local resp
+  resp=$(curl -fsS --location-trusted --max-time 30 \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -d '{"type":"backup-etcd","params":{}}' \
+    "$cp_url/jobs") \
+    || die "POST /jobs failed — daemon unreachable?"
+  local job_id
+  job_id=$(printf '%s' "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+  ok "job created: $job_id"
+  _poll_job "$job_id" "$cp_url" "$token"
 }

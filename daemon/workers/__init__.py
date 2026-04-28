@@ -11,4 +11,7 @@ a new job type:
 `daemon/main.py` imports this package once during lifespan.
 """
 
-from . import create_backup  # noqa: F401  -- registers "create-backup"
+from . import create_backup   # noqa: F401  -- registers "create-backup"
+from . import export_backup   # noqa: F401  -- registers "export-backup"
+from . import restore_backup  # noqa: F401  -- registers "restore-backup"
+from . import backup_etcd     # noqa: F401  -- registers "backup-etcd"

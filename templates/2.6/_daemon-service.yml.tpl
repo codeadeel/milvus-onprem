@@ -31,6 +31,12 @@
       # daemon. Trade-off: the daemon process can control the host
       # docker engine — protected by being only locally accessible.
       - /var/run/docker.sock:/var/run/docker.sock
+      # /tmp passthrough so the operator's `--to=/tmp/...` paths used
+      # by export-backup land on the host filesystem rather than in
+      # the container's ephemeral /tmp. Same trick for any other
+      # well-known shared path the operator passes through (/mnt
+      # mounts, NFS, USB) would need its own additional bind here.
+      - /tmp:/tmp
     depends_on:
       - etcd
     healthcheck:
