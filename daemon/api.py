@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -101,6 +102,85 @@ async def get_topology(request: Request) -> dict[str, Any]:
         "peer_count": topology.peer_count,
         "peers": topology.peers,
     }
+
+
+@router.get("/status", dependencies=[Depends(require_token)], tags=["cluster"])
+async def get_status(request: Request) -> dict[str, Any]:
+    """Cluster-wide status snapshot.
+
+    Aggregates this daemon's view of cluster identity, leader, peer
+    membership, and the local node's daemon health. Operator's CLI
+    formats this; the daemon just returns the raw shape.
+    """
+    cfg = request.app.state.config
+    leader = request.app.state.leader
+    topology = request.app.state.topology
+
+    leader_info_raw = await request.app.state.etcd.get(LEADER_KEY)
+    leader_info: dict[str, Any] | None = None
+    if leader_info_raw:
+        try:
+            leader_info = json.loads(leader_info_raw)
+        except json.JSONDecodeError:
+            leader_info = {"raw": leader_info_raw}
+
+    return {
+        "cluster_name": cfg.cluster_name,
+        "this_node": {
+            "name": cfg.node_name,
+            "ip": cfg.local_ip,
+            "is_leader": leader.is_leader,
+        },
+        "leader": leader_info,
+        "peer_count": topology.peer_count,
+        "peers": [
+            {
+                "name": name,
+                "ip": info.get("ip"),
+                "joined_at": info.get("joined_at"),
+                "role": info.get("role", "peer"),
+            }
+            for name, info in sorted(topology.peers.items())
+        ],
+    }
+
+
+@router.get("/urls", dependencies=[Depends(require_token)], tags=["cluster"])
+async def get_urls(request: Request) -> dict[str, Any]:
+    """Connection URLs for clients.
+
+    Returns each peer's Milvus / nginx-LB / MinIO endpoints so an
+    operator can hand them to a downstream user without grepping
+    cluster.env. Ports are read from the daemon's config (set at
+    container start by render).
+    """
+    cfg = request.app.state.config
+    topology = request.app.state.topology
+
+    # Ports come from the daemon's env. CONTROL_PLANE_PORT is always
+    # set; others fall back to the project defaults.
+    cp_port = cfg.listen_port
+    # The daemon doesn't carry milvus / minio / lb ports as fields, so
+    # we infer the project defaults. Operator can override via env.
+    milvus_port = int(os.environ.get("MILVUS_ONPREM_MILVUS_PORT", "19530"))
+    lb_port = int(os.environ.get("MILVUS_ONPREM_NGINX_LB_PORT", "19537"))
+    minio_port = int(os.environ.get("MILVUS_ONPREM_MINIO_API_PORT", "9000"))
+
+    peers = []
+    for name, info in sorted(topology.peers.items()):
+        ip = info.get("ip")
+        if not ip:
+            continue
+        peers.append(
+            {
+                "node": name,
+                "milvus": f"{ip}:{milvus_port}",
+                "lb": f"{ip}:{lb_port}",
+                "minio_api": f"http://{ip}:{minio_port}",
+                "control_plane": f"http://{ip}:{cp_port}",
+            }
+        )
+    return {"peers": peers}
 
 
 @router.post(
