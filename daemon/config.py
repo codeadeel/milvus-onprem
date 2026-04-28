@@ -69,6 +69,20 @@ class DaemonConfig(BaseSettings):
         description="Max auto-restarts per container in the loop-window.",
     )
 
+    # Job retention.
+    jobs_retention_s: int = Field(
+        default=30 * 24 * 3600,
+        description=(
+            "Age beyond which terminated jobs (done/failed/cancelled) are "
+            "deleted from etcd. Default 30 days. Running/pending jobs are "
+            "never pruned regardless of age."
+        ),
+    )
+    jobs_prune_interval_s: int = Field(
+        default=3600,
+        description="Seconds between leader-side retention sweeps. Default 1h.",
+    )
+
     @property
     def etcd_endpoint_list(self) -> list[str]:
         """Split the comma-separated `etcd_endpoints` into a list,

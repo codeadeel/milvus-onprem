@@ -208,6 +208,37 @@ class JobsManager:
         """Compose the etcd key for a job id."""
         return f"{JOBS_PREFIX}{jid}"
 
+    async def prune_old(self, retention_s: int) -> int:
+        """Delete terminated jobs older than `retention_s`.
+
+        Terminated = done | failed | cancelled (anything with a
+        `finished_at`). Running/pending jobs are skipped — even if their
+        owner died, the operator should clean those up explicitly so
+        they don't lose evidence of a stuck job.
+
+        Returns number of jobs deleted. Caller is expected to gate on
+        leader status; this method itself is safe to call from any
+        daemon (idempotent — etcd delete of a missing key is a no-op).
+        """
+        cutoff = time.time() - retention_s
+        deleted = 0
+        for job in await self.list_jobs():
+            if job.state not in ("done", "failed", "cancelled"):
+                continue
+            if job.finished_at is None or job.finished_at >= cutoff:
+                continue
+            try:
+                await self._etcd.delete(self._key(job.id))
+                deleted += 1
+            except Exception as e:
+                log.warning("prune of job %s failed: %s", job.id, e)
+        if deleted:
+            log.info(
+                "pruned %d terminated job(s) older than %ds (cutoff=%d)",
+                deleted, retention_s, int(cutoff),
+            )
+        return deleted
+
     async def _execute(self, job: Job) -> None:
         """Wrap the worker fn with state transitions + periodic flushes.
 

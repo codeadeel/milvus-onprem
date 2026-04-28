@@ -115,6 +115,33 @@ async def lifespan(app: FastAPI):
     local_watchdog = LocalComponentWatchdog(config)
     peer_watchdog = PeerReachabilityWatchdog(config, topology)
 
+    # Job retention sweeper — only the leader prunes (etcd writes are
+    # leader-funneled anyway), but every daemon checks via is_leader so
+    # it just runs on the active leader and is a no-op everywhere else.
+    stop_pruner = asyncio.Event()
+
+    async def _retention_loop() -> None:
+        """Periodically delete terminated jobs older than the retention
+        window. Leader-only; followers tick but skip the work."""
+        log.info(
+            "jobs retention loop: interval=%ds retention=%ds (leader-only)",
+            config.jobs_prune_interval_s, config.jobs_retention_s,
+        )
+        while not stop_pruner.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop_pruner.wait(), timeout=config.jobs_prune_interval_s
+                )
+                break  # event set → shutdown
+            except asyncio.TimeoutError:
+                pass
+            if not elector.is_leader:
+                continue
+            try:
+                await jobs_mgr.prune_old(config.jobs_retention_s)
+            except Exception as e:
+                log.warning("jobs prune tick errored: %s", e)
+
     # Stash on app.state so route handlers can read them.
     app.state.config = config
     app.state.etcd = etcd
@@ -141,12 +168,16 @@ async def lifespan(app: FastAPI):
     peer_watchdog_task = asyncio.create_task(
         peer_watchdog.run(), name="peer-watchdog"
     )
+    retention_task = asyncio.create_task(
+        _retention_loop(), name="jobs-retention"
+    )
 
     background_tasks = (
         elector_task,
         topology_task,
         local_watchdog_task,
         peer_watchdog_task,
+        retention_task,
     )
 
     try:
@@ -157,6 +188,7 @@ async def lifespan(app: FastAPI):
         await topology.stop()
         await local_watchdog.stop()
         await peer_watchdog.stop()
+        stop_pruner.set()
         for t in background_tasks:
             t.cancel()
         for t in background_tasks:
