@@ -4,6 +4,28 @@
 > from this doc until ratified. Once ratified, this doc is the spec
 > for Stages 2-7 of the implementation.
 
+## 0 — Goal
+
+**A self-maintaining HA Milvus cluster on plain Linux VMs.** The
+control plane handles its own internal state propagation —
+topology, rendering, nginx reload, MinIO pool changes, etcd
+membership, leader election, in-flight job recovery — without
+operator intervention. The operator's job is reduced to:
+
+1. Provision VMs.
+2. Run `init` on the first node.
+3. Run `join` on each subsequent node.
+4. Trigger backups / restores / upgrades **on demand** when they
+   want to (the daemon orchestrates each end-to-end).
+
+Self-maintaining here means: **all internal state stays
+consistent across peers automatically** (you change one thing,
+it propagates everywhere). It does **not** mean: scheduled
+backups, periodic housekeeping cron, or auto-restart of failing
+components — those are deliberate non-goals (see §2). User-facing
+operations are user-initiated; cluster-internal consistency is
+the daemon's job.
+
 ## 1 — Why
 
 Today's deploy flow has hard friction the operator has flagged on
@@ -42,14 +64,25 @@ topology in etcd, and orchestrates topology changes automatically.
   add` (new pool per growth event). No risky server-list edits.
 - Backwards compat: **none**. We start fresh per operator's call.
 
-### Non-goals (this design / v1)
+### Non-goals (this design — any tier)
 
 - mTLS / cert distribution. Auth is a shared cluster token.
-- `remove-node`. Punt to v1.1 once the add path is solid.
 - Zero-downtime mode flip standalone↔distributed. We require
   teardown + re-init to switch modes.
 - API versioning. Single version; bump deliberately if we ever
   need it.
+- **Scheduled / cron / recurring jobs.** Backups, snapshots, etc.
+  are user-initiated only. Operator runs the command when they
+  want to export, migrate, or replicate.
+- **Periodic self-maintenance** (etcd defrag, MinIO heal,
+  segment GC, self-test). Milvus and MinIO have their own
+  internal housekeeping; we trust them. Operator can trigger
+  these manually if they ever need to.
+- **Auto-restart of unhealthy components.** A failing component
+  alerts the operator; the operator decides what to do. Auto-
+  restart can mask real bugs and is harmful for a stateful system.
+- Cloud / VM provisioning. Operator brings the VMs; we deploy
+  onto them.
 
 ## 3 — Architecture
 
@@ -84,10 +117,13 @@ flowchart TB
 
 ### Key roles
 
-- **Daemon (every node)** — Python HTTP server. Written in `~500 lines`
-  total across `daemon/main.py`, `daemon/leader.py`, `daemon/api.py`,
-  `daemon/topology.py`. Containerised, runs in the rendered compose
-  next to Milvus.
+- **Daemon (every node)** — **FastAPI** HTTP server (Python
+  3.12), `~500 lines` total across `daemon/main.py`,
+  `daemon/leader.py`, `daemon/api.py`, `daemon/topology.py`.
+  Containerised, runs in the rendered compose next to Milvus.
+  FastAPI gives us pydantic request/response validation, OpenAPI
+  schema for free, async I/O for etcd watches, and built-in
+  Server-Sent Events for log streaming — all things we want.
 - **Leader (one at a time)** — Whichever daemon holds the etcd
   leader lease. Handles all writes (`/join`, topology updates,
   MinIO orchestration). Followers redirect writes via 307 to leader.
@@ -418,23 +454,19 @@ difference between local and remote invocation.
 | `export-backup` / `restore-backup` | Daemon jobs | v1.1 |
 | `backup-etcd` | Daemon job (etcd snapshot via leader) | v1.1 |
 | `list-backups` | Daemon `GET /backups` | v1.1 |
-| `schedule-backup --cron="0 2 * * *" --retention=7` | Daemon stores schedule in etcd, runs as recurring job | v1.1 |
 | `remove-node --ip=X` | Daemon job: drains peer, etcd member-remove, MinIO pool-remove, nginx update | v1.1 |
 | `upgrade --milvus-version=v2.6.12 [--strategy=rolling]` | Daemon job: rolling restart with new image, peer-by-peer | v1.2 |
 | `rollback --to=v2.6.11` | Daemon job | v1.2 |
-| `compact-etcd` | Daemon job (defrag + compact) | v1.2 |
-| `heal-minio` | Daemon job | v1.2 |
 
 ### New CLI commands enabled by the daemon
 
 | Command | What | Tier |
 |---|---|---|
+| `leader` | Show current leader | v1 |
 | `jobs list [--state=running\|done\|failed]` | List recent jobs from etcd | v1.1 |
 | `jobs show <id>` | Show one job's params + progress + logs | v1.1 |
-| `jobs cancel <id>` | Cancel a running job | v1.2 |
-| `events` | Stream cluster events (joins, restarts, alerts) via SSE | v1.2 |
-| `config get <key>` / `config set <key> <value>` | Cluster-wide config kv via etcd | v1.2 |
-| `leader` | Show current leader | v1 |
+| `jobs cancel <id>` | Cancel a running job | v1.1 |
+| `events` | Stream cluster events (joins, leader changes, peer-down alerts) via SSE | v1.2 |
 
 ## 13 — Jobs abstraction
 
@@ -442,6 +474,11 @@ Long-running operations (backup, restore, upgrade, remove-node)
 need an async pattern. We introduce a **jobs** primitive: every
 long-running op gets a job entry in etcd, identified by a UUID,
 with state, progress, params, and logs.
+
+> Jobs are **always operator-initiated** in this design — there is
+> no scheduler, no cron, no recurring entry. The pattern exists to
+> manage user-triggered long-running ops cleanly, not to enable
+> automation-without-operator.
 
 ### Job lifecycle
 
@@ -463,19 +500,14 @@ stateDiagram-v2
 /cluster/jobs/<uuid>                  → JSON: {type, params, state, progress, started_at, finished_at, error?}
 /cluster/jobs/<uuid>/logs             → append-only log lines (capped)
 /cluster/jobs/<uuid>/owner            → which daemon is executing (lease — recovers on owner death)
-/cluster/schedules/<id>               → JSON: {cron, type, params, retention?}  (recurring jobs)
 ```
 
-### Job types (extensible)
+### Job types
 
 - `create-backup`, `restore-backup`, `export-backup`, `backup-etcd`
 - `add-pool` (MinIO pool-add — runs as part of `/join`)
 - `remove-node`
 - `version-upgrade` (rolling)
-- `etcd-defrag`, `etcd-compact`
-- `minio-heal`
-- `health-check` (periodic)
-- `cleanup-orphan-segments` (Milvus housekeeping)
 
 ### Resilience
 
@@ -496,79 +528,72 @@ stateDiagram-v2
 | `GET /jobs/<uuid>` | Single job state. |
 | `GET /jobs/<uuid>/logs?stream=true` | Stream logs (SSE) or paginate. |
 | `POST /jobs/<uuid>/cancel` | Request cancel. |
-| `POST /schedules` | Register a recurring job. |
-| `GET /schedules` / `DELETE /schedules/<id>` | Manage schedules. |
 
-## 14 — Automation goals (minimum-human-intervention)
+## 14 — What the daemon does autonomously
 
-Concrete things the daemon does **without operator action**:
+The cluster is **self-maintaining for internal state**: any change
+the operator triggers (or any peer-side change reflected in etcd)
+propagates everywhere automatically. The daemon does **not**
+schedule recurring work or auto-restart failing components — those
+are non-goals per §2. Below is the concrete breakdown.
 
-### v1 (ships with first cut)
+### v1 (auto-propagation of topology)
 - Auto-render templates on topology change (no manual `render`).
 - Auto-reload nginx on topology change.
 - Auto-allocate `node-N` names at join.
 - Auto-add MinIO pool at join.
 - Auto-call etcd member-add at join.
 - Auto-validate token + IP not already a member.
-- Auto-detect leader-failover and resume in-flight jobs.
+- Detect leader-failover and resume in-flight jobs from etcd
+  state.
 
-### v1.1 (backup + remove-node)
-- **Scheduled backups** with retention. Operator: one
-  `schedule-backup --cron=… --retention=N` call. Daemon: runs
-  forever, prunes old backups, surfaces failures.
-- Auto-pause replicas during restore (avoid stale reads).
-- Auto-pool-remove on `remove-node` (orchestrated drain →
-  member-remove → pool decommission).
+### v1.1 (operator-initiated backups + remove-node)
+- `create-backup` runs `milvus-backup` from the leader-picked node,
+  tracks state in etcd, returns when complete.
+- `restore-backup` reverse path; auto-pauses replicas during
+  restore.
+- `remove-node` orchestrates drain → etcd member-remove → MinIO
+  pool decommission → nginx update on all peers.
+- Idempotent retry / resume on leader failover mid-job.
 
-### v1.2 (upgrade + housekeeping)
-- **Rolling Milvus upgrade**: one `upgrade --milvus-version=X` call.
-  Daemon: pulls new image on every peer, rolling-restarts one at a
-  time, waits healthy, repeats. Aborts and rolls back on health
-  check failure mid-upgrade.
-- Periodic etcd compact + defrag (weekly default; configurable).
-- Periodic MinIO `mc admin heal --recursive`.
-- Periodic Milvus segment GC.
-- **Auto-watchdog** integrated with control plane: each daemon
-  reports peer-status to leader. Leader emits structured alerts
-  to a configurable sink (journald default; webhook optional)
-  when a peer is down beyond threshold. Optional: leader can
-  `docker restart` an unhealthy local component on a peer
-  (defaults to off; opt in via `--auto-restart`).
-- Periodic cluster-wide self-test: backup-and-restore on a
-  throwaway collection. Validates that the entire backup
-  pipeline still works without the operator running smoke
-  manually.
-- Resource-pressure alerts: disk, memory, etcd DB size, MinIO
-  drive utilisation.
+### v1.2 (rolling Milvus upgrade + alert-only watchdog)
+- **Rolling Milvus upgrade** via `upgrade --milvus-version=X`:
+  daemon pulls new image on every peer, rolling-restarts one at a
+  time, waits healthy, repeats. Aborts on health-check failure
+  mid-upgrade and stops at the last known-good peer (operator
+  decides next steps).
+- **Alert-only watchdog.** Each daemon polls peer reachability;
+  leader emits structured `PEER_DOWN` / `PEER_UP` events to
+  journald (and optionally a webhook). **No auto-action** —
+  alerts give the operator visibility, the operator decides what
+  to do. This replaces the existing `lib/watchdog.sh` systemd
+  unit; same alert format.
 
-### Things still needing the operator (by design — out of scope
-for IP-only / no-cloud-API design)
+### Things still needing the operator (by design)
 
-- Provisioning new VMs.
-- Decommissioning VMs at the cloud level.
-- DNS / load-balancer config beyond what nginx does.
-- Network changes (firewall, MTU).
-- Capacity planning (when to scale up).
+- VM provisioning / decommissioning.
+- Routine backup discipline (when to back up; we provide the
+  command, not the schedule).
+- Capacity planning, version-upgrade timing, recovery decisions
+  on peer death.
+- DNS / firewall / MTU outside nginx's TCP LB.
 
 ## 15 — Updated implementation stages
 
 | Stage | Scope | Validates |
 |---|---|---|
-| 2 | Daemon scaffold + leader election + topology watch (v1) | Daemon runs as container, elects leader, watches topology. |
+| 2 | Daemon scaffold (FastAPI) + leader election + topology watch (v1) | Daemon runs as container, elects leader, watches topology. |
 | 3 | `init --mode=...` rewrite, cluster-mode-of-1, token issuance (v1) | First-deploy works in both modes. |
 | 4 | `join` rewrite via persistent daemon (v1) | 1→2 grow with no manual peer-prep. |
 | 5 | Topology-watch render + nginx reload + MinIO pool-add (v1) | 2→3→4 grow auto-propagates. |
 | 6 | Read-only operator endpoints: `status`, `urls`, `version`, `logs`, `leader`, `events` (v1) | CLI works as thin client end-to-end. |
 | 7 | **First validation** — full v1 deploy + grow + leader failover + replication-proof on 4 peers + LB | v1 ships. |
-| 8 | Jobs abstraction + `create-backup`, `restore-backup`, `backup-etcd`, `list-backups`, `jobs list/show` (v1.1) | Backup pipeline works via control plane. |
-| 9 | `schedule-backup` with cron + retention (v1.1) | Recurring backups + pruning. |
-| 10 | `remove-node` job (v1.1) | Cluster shrink. |
-| 11 | **v1.1 validation** — backup-and-restore, scale up + down on 4 VMs | v1.1 ships. |
-| 12 | `upgrade --milvus-version=X` rolling (v1.2) | In-place version upgrade. |
-| 13 | Auto-watchdog integrated into daemon + structured alerts (v1.2) | Operator gets paged on peer failure. |
-| 14 | Periodic housekeeping (etcd defrag, MinIO heal, segment GC) (v1.2) | Cluster self-maintains. |
-| 15 | Periodic self-test (backup→restore on throwaway collection) (v1.2) | Cluster validates itself. |
-| 16 | **v1.2 validation** — full upgrade drill, watchdog drill, soak test | v1.2 ships. |
+| 8 | Jobs abstraction + `create-backup`, `restore-backup`, `backup-etcd`, `list-backups`, `jobs list/show/cancel` (v1.1) | Backup pipeline works via control plane. |
+| 9 | `remove-node` job (v1.1) | Cluster shrink. |
+| 10 | **v1.1 validation** — backup-and-restore, scale up + down on 4 VMs | v1.1 ships. |
+| 11 | `upgrade --milvus-version=X` rolling (v1.2) | In-place version upgrade. |
+| 12 | Alert-only watchdog integrated into daemon, structured PEER_DOWN/UP events (v1.2) | Operator gets visibility on peer failure. |
+| 13 | **v1.2 validation** — upgrade drill, watchdog drill | v1.2 ships. |
 
 Each stage is one commit (or two — code + validation evidence).
 After Stage 7 (v1 ships) we have a working cluster meeting the
