@@ -1,14 +1,17 @@
 # =============================================================================
-# lib/cmd_join.sh — fetch cluster.env from the bootstrap node, then bootstrap
+# lib/cmd_join.sh — join an existing distributed cluster as a new peer
 #
-# Run on every non-bootstrap peer. After the bootstrap node has run
-# `milvus-onprem pair` and printed a token, each peer runs:
+# Replaces the pre-control-plane pair/join flow. From a fresh VM:
 #
-#   milvus-onprem join <bootstrap-ip>:<port> <token>
+#   ./milvus-onprem join <leader-ip>:19500 <cluster-token>
 #
-# This fetches cluster.env via HTTP (Bearer auth), validates it, runs host
-# prep, then runs bootstrap automatically — no separate init/bootstrap on
-# joining nodes.
+# This POSTs /join to the control-plane daemon (which 307-redirects to
+# the leader if hit on a follower). The leader does the orchestration
+# end-to-end: etcd member-add, node-N allocation, topology entry, and
+# returns a fully-baked cluster.env for this peer to write locally.
+#
+# After cluster.env is on disk, this script runs host_prep + bootstrap
+# locally — no separate init/bootstrap step on joining peers.
 # =============================================================================
 
 [[ -n "${_CMD_JOIN_SH_LOADED:-}" ]] && return 0
@@ -16,64 +19,171 @@ _CMD_JOIN_SH_LOADED=1
 
 cmd_join() {
   if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || $# -lt 2 ]]; then
-    cat <<EOF
-Usage: milvus-onprem join <bootstrap-ip>:<port> <token> [--existing]
-
-Fetch cluster.env from the bootstrap node and run bootstrap locally.
-The bootstrap-ip:port and token come from the bootstrap node's
-\`milvus-onprem pair\` output.
-
-  --existing    Join an EXISTING running cluster (this node was added
-                via \`milvus-onprem add-node\` on a healthy peer, not
-                part of the original \`init\` set). Sets
-                ETCD_INITIAL_CLUSTER_STATE=existing so etcd joins
-                rather than trying to bootstrap a new Raft cluster.
-                Default (omitted): node is part of the initial deploy.
-EOF
+    _cmd_join_help
     [[ $# -lt 2 ]] && return 1 || return 0
   fi
 
-  local pair_addr="$1" token="$2"; shift 2
-  local existing=0
+  local target="$1" token="$2"; shift 2
+  local local_ip=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --existing) existing=1; shift ;;
+      --local-ip=*) local_ip="${1#*=}"; shift ;;
       *) die "unknown flag: $1 (try --help)" ;;
     esac
   done
 
   if [[ -f "$CLUSTER_ENV" ]]; then
-    die "cluster.env already exists at $CLUSTER_ENV — \`milvus-onprem teardown --full --force\` first if you really want to re-join"
+    die "cluster.env already exists at $CLUSTER_ENV — \`./milvus-onprem teardown --full --force\` first if you really want to re-join"
   fi
 
-  local url="http://${pair_addr}/cluster.env"
-  info "==> fetching cluster.env from $url"
-  if ! curl -sf --max-time 30 \
-       -H "Authorization: Bearer $token" \
-       -o "$CLUSTER_ENV" "$url"; then
-    rm -f "$CLUSTER_ENV"
-    die "fetch failed — possible causes: bad token, server already exited, port blocked, wrong host"
+  # Auto-detect our own IP (operator can override with --local-ip if
+  # hostname -I returns something we don't want).
+  if [[ -z "$local_ip" ]]; then
+    local_ip="$(_join_detect_local_ip)" \
+      || die "couldn't auto-detect local IP from \`hostname -I\`. Pass --local-ip=<ip> explicitly."
   fi
+
+  info "==> joining cluster via $target (advertising self as $local_ip)"
+
+  # Hit the leader's /join endpoint. -L follows the 307 redirect that
+  # a follower would send. -X POST + -d sends the body even after the
+  # redirect (curl handles 307 correctly: same method, same body).
+  local body
+  body=$(printf '{"ip":"%s","hostname":"%s"}' "$local_ip" "$(hostname -s 2>/dev/null || true)")
+  local resp http_code
+  local resp_file; resp_file="$(mktemp)"
+  http_code="$(curl -sSL --max-time 60 \
+    -o "$resp_file" -w "%{http_code}" \
+    -X POST \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -d "$body" \
+    "http://$target/join" || echo "000")"
+
+  if [[ "$http_code" != "200" ]]; then
+    local err; err=$(cat "$resp_file" 2>/dev/null || echo "")
+    rm -f "$resp_file"
+    die "join request failed (HTTP $http_code): $err"
+  fi
+  resp="$(cat "$resp_file")"
+  rm -f "$resp_file"
+
+  # Parse the response. python3 is required by the project anyway
+  # (test/tutorial uses pymilvus); using it here avoids a jq dep.
+  local node_name leader_ip cluster_env_body
+  node_name=$(_join_parse_field "$resp" node_name)   || die "response missing node_name"
+  leader_ip=$(_join_parse_field "$resp" leader_ip)   || die "response missing leader_ip"
+  cluster_env_body=$(_join_parse_cluster_env "$resp") \
+    || die "response missing cluster_env body"
+
+  ok "leader allocated $node_name; writing cluster.env"
+  printf '%s' "$cluster_env_body" > "$CLUSTER_ENV"
   chmod 600 "$CLUSTER_ENV"
-  ok "wrote $CLUSTER_ENV"
 
-  # Sanity-check the fetched file before relying on it.
+  # Sanity-check the file before relying on it.
   grep -q "^PEER_IPS=" "$CLUSTER_ENV" \
-    || die "fetched file doesn't look like cluster.env (missing PEER_IPS)"
+    || die "fetched cluster.env doesn't look right (missing PEER_IPS)"
+  grep -q "^ETCD_INITIAL_CLUSTER_STATE=existing" "$CLUSTER_ENV" \
+    || warn "cluster.env from leader didn't set ETCD_INITIAL_CLUSTER_STATE=existing — joiner etcd may try to bootstrap fresh"
 
-  # Load + validate, prep host, then run the full bootstrap.
-  env_require
-  role_detect
-  role_validate_size
+  # Now run the standard local pipeline: load env, prep host, build the
+  # daemon image, render templates, bootstrap.
+  env_load >/dev/null
+  host_prep "$DATA_ROOT" "${MODE:-distributed}"
 
-  info "==> joining as $NODE_NAME ($LOCAL_IP)"
-  host_prep "$DATA_ROOT"
-
-  if (( existing )); then
-    info "==> joining EXISTING cluster (etcd state=existing)"
-    export ETCD_INITIAL_CLUSTER_STATE=existing
+  if [[ "${MODE:-distributed}" == "distributed" ]]; then
+    _join_build_daemon_image
   fi
 
-  info "==> running bootstrap"
+  info "==> running bootstrap (state=existing for etcd)"
   cmd_bootstrap
+
+  echo ""
+  echo "========================================================================"
+  echo "  joined as $node_name (leader=$leader_ip)"
+  echo "========================================================================"
+  echo "  Verify from any node:    ./milvus-onprem status"
+  echo "  Verify locally:          docker ps"
+  echo "========================================================================"
+}
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+# First non-loopback IPv4 from `hostname -I`. Empty on failure.
+# (Same logic as cmd_init.sh's helper but kept local to avoid a new lib file.)
+_join_detect_local_ip() {
+  local ip
+  ip="$(hostname -I 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $i !~ /^127\./) {print $i; exit}}')"
+  [[ -n "$ip" ]] || return 1
+  printf '%s' "$ip"
+}
+
+# Extract a top-level string field from a JSON response. Stdin = response.
+# Usage: _join_parse_field <json> <field>
+_join_parse_field() {
+  local json="$1" field="$2"
+  printf '%s' "$json" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    v = d.get('$field')
+    if v is None:
+        sys.exit(1)
+    print(v)
+except Exception:
+    sys.exit(1)
+"
+}
+
+# Cluster_env can contain newlines so we extract it carefully (python
+# preserves them; bash command substitution would mangle a `\n` in JSON).
+_join_parse_cluster_env() {
+  local json="$1"
+  printf '%s' "$json" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    sys.stdout.write(d['cluster_env'])
+except Exception:
+    sys.exit(1)
+"
+}
+
+# Build the daemon image locally if not already present. Idempotent.
+_join_build_daemon_image() {
+  local image="${CONTROL_PLANE_IMAGE:-milvus-onprem-cp:dev}"
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    info "daemon image $image already built"
+    return 0
+  fi
+  info "building daemon image $image (one-time per node)"
+  docker build -t "$image" "$REPO_ROOT/daemon/" \
+    || die "daemon image build failed — see docker output above"
+}
+
+_cmd_join_help() {
+  cat <<'EOF'
+Usage: milvus-onprem join <host>:<port> <cluster-token> [--local-ip=IP]
+
+Join an existing distributed cluster as a new peer. Run on a fresh VM
+(no cluster.env present). The control-plane daemon at <host>:<port>
+allocates a node-N name, adds this peer to etcd Raft, and returns a
+ready-to-use cluster.env which we write locally before bootstrapping.
+
+ARGS:
+  <host>:<port>     Any peer's control-plane endpoint, e.g. 10.0.0.2:19500.
+                    Followers 307-redirect to whoever is currently leader.
+  <cluster-token>   Shared bearer token printed by `init --mode=distributed`
+                    (or read from any existing peer's cluster.env).
+
+OPTIONS:
+  --local-ip=IP     Override hostname -I auto-detection.
+  -h, --help        Show this help.
+
+After join completes, this node is fully part of the cluster — etcd
+member, MinIO drive owner (a separate pool), Milvus replica, control-
+plane daemon. No further commands required on the joining node.
+EOF
 }

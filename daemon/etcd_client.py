@@ -122,6 +122,33 @@ class EtcdClient:
         """Revoke a lease; all keys attached to it are deleted immediately."""
         await self._post("/v3/lease/revoke", {"ID": lease_id})
 
+    # ── cluster membership ───────────────────────────────────────────
+
+    async def member_add(self, peer_urls: list[str]) -> dict[str, Any]:
+        """Add a learner / voting member to the etcd Raft cluster.
+
+        Returns the full response from etcd, including:
+          - `member`: the new member entry (id, name=<empty>, peerURLs)
+          - `members`: every member's entry post-update — used by the
+            joiner to compute its --initial-cluster argument
+
+        The new member is `unstarted` until its etcd process starts
+        with `--initial-cluster-state=existing` and connects.
+        """
+        return await self._post(
+            "/v3/cluster/member/add",
+            {"peerURLs": peer_urls},
+        )
+
+    async def member_list(self) -> list[dict[str, Any]]:
+        """Return the etcd Raft membership as a list of member dicts.
+
+        Useful for sanity checks and for computing `--initial-cluster`
+        strings without re-issuing a member-add.
+        """
+        r = await self._post("/v3/cluster/member/list", {})
+        return r.get("members") or []
+
     # ── kv ───────────────────────────────────────────────────────────
 
     async def put(

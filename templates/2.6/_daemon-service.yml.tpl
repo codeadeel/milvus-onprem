@@ -15,7 +15,12 @@
       - MILVUS_ONPREM_LOCAL_IP=${LOCAL_IP}
       - MILVUS_ONPREM_CLUSTER_TOKEN=${CLUSTER_TOKEN}
       - MILVUS_ONPREM_ETCD_ENDPOINTS=http://${LOCAL_IP}:${ETCD_CLIENT_PORT}
+      - MILVUS_ONPREM_ETCD_PEER_PORT=${ETCD_PEER_PORT}
       - MILVUS_ONPREM_LISTEN_PORT=${CONTROL_PLANE_PORT}
+    volumes:
+      # The /join handler reads cluster.env to build a copy for the
+      # joining peer. Read-only mount; daemon never edits it.
+      - ${REPO_ROOT}/cluster.env:/etc/milvus-onprem/cluster.env:ro
     depends_on:
       - etcd
     healthcheck:

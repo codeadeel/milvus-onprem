@@ -31,6 +31,13 @@ class DaemonConfig(BaseSettings):
         ...,
         description="Comma-separated etcd HTTP endpoints, e.g. http://10.0.0.2:2379.",
     )
+    etcd_peer_port: int = Field(
+        default=2380,
+        description=(
+            "etcd Raft peer port. Used by /join to compute the joiner's "
+            "peerURL when calling member-add."
+        ),
+    )
     listen_port: int = 19500
     lease_ttl_s: int = 15
     keepalive_interval_s: int = 5

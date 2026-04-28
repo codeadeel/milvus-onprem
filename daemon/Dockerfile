@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Source goes into /app/daemon/ so `python -m daemon.main` works.
 COPY __init__.py /app/daemon/
-COPY config.py etcd_client.py leader.py topology.py auth.py api.py main.py /app/daemon/
+COPY config.py etcd_client.py leader.py topology.py joining.py auth.py api.py main.py /app/daemon/
 
 EXPOSE 19500
 
