@@ -104,18 +104,12 @@ Consequences:
 - **Failover is manual.** Move PULSAR_HOST to a surviving node, re-render,
   redeploy Pulsar. There's no automation for this in v0.
 
-If you can accept this trade-off (e.g. dev / staging, batch-only ingest
-workloads, write outage tolerable), this is fine. If you need true HA,
-your options are:
-
-1. **Point at an external Pulsar cluster** — set
-   `PULSAR_HOST=<external-pulsar-ip>` and remove the local Pulsar
-   service from your compose. Right answer if you already have a
-   Pulsar SRE team; operationally cleanest.
-2. **Run Pulsar HA in-cluster** — design + scaffolding live in
-   [`docs/PULSAR_HA.md`](../../docs/PULSAR_HA.md). Adds 9 containers
-   (3 ZK + 3 BK + 3 broker) to a 3-node cluster. *Not yet
-   implemented* — design-doc only at this point.
+If you can accept this trade-off (e.g. dev / staging, batch-only
+ingest workloads, write outage tolerable), this is fine. If you need
+true HA writes, point at an external Pulsar cluster: set
+`PULSAR_HOST=<external-pulsar-ip>` and remove the local Pulsar
+service from your compose. Your Pulsar SRE team handles HA;
+milvus-onprem just connects.
 
 ## Why coord-mode-cluster
 

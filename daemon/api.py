@@ -406,6 +406,31 @@ class RecreateMinioSelfResponse(BaseModel):
     error: str | None = None
 
 
+class RotateSelfRequest(BaseModel):
+    """Body for `POST /rotate-self`. The OLD bearer token authenticates
+    the request; `new_token` is the value the follower should write
+    into its cluster.env."""
+
+    new_token: str = Field(..., min_length=32)
+
+
+class RotateSelfResponse(BaseModel):
+    """Body returned from `POST /rotate-self` once cluster.env is
+    updated and a self-recreate is scheduled (the daemon will die
+    inside RECREATE_DELAY_S seconds — RPC has already returned by
+    then)."""
+
+    log: list[str]
+    error: str | None = None
+
+
+class PeerClockResponse(BaseModel):
+    """Body returned from `GET /peer/clock`. Used by `preflight --peer`
+    to detect inter-peer time skew without resorting to SSH."""
+
+    ts: float
+
+
 @router.post(
     "/admin/sweep",
     dependencies=[Depends(require_token)],
@@ -525,3 +550,54 @@ async def post_upgrade_self(req: UpgradeSelfRequest, request: Request) -> Any:
         log.exception("upgrade-self failed")
         captured.append(f"ERROR: {type(e).__name__}: {e}")
         return UpgradeSelfResponse(log=captured, error=f"{type(e).__name__}: {e}")
+
+
+@router.post(
+    "/rotate-self",
+    dependencies=[Depends(require_token)],
+    tags=["internal"],
+    response_model=RotateSelfResponse,
+)
+async def post_rotate_self(req: RotateSelfRequest, request: Request) -> Any:
+    """Execute the local CLUSTER_TOKEN rotation. Called by the leader's
+    rotate-token orchestrator on each follower in parallel.
+
+    The OLD token authenticates this request; the body carries the NEW
+    token the follower should write to its cluster.env. The local
+    procedure: update cluster.env (preserving host file ownership),
+    re-render, schedule a detached self-recreate of the control-plane
+    container (which will kill the daemon ~5s after this response is
+    returned).
+
+    Auth-gated by the cluster bearer token; not meant to be called by
+    operators directly. The CLI's `rotate-token` command is the
+    operator-facing entry point and submits the cluster-wide job."""
+    from .workers.rotate_token import rotate_self
+
+    captured: list[str] = []
+
+    def writer(line: str) -> None:
+        captured.append(line.rstrip("\n"))
+
+    try:
+        await rotate_self(writer, req.new_token)
+        return RotateSelfResponse(log=captured, error=None)
+    except Exception as e:
+        log.exception("rotate-self failed")
+        captured.append(f"ERROR: {type(e).__name__}: {e}")
+        return RotateSelfResponse(log=captured, error=f"{type(e).__name__}: {e}")
+
+
+@router.get(
+    "/peer/clock",
+    dependencies=[Depends(require_token)],
+    tags=["meta"],
+    response_model=PeerClockResponse,
+)
+async def get_peer_clock() -> Any:
+    """Return this peer's current unix time. Used by `preflight --peer`
+    to detect inter-peer time skew (etcd Raft is sensitive to >30s
+    skew). Cheap, auth-gated; the bearer token already proves the
+    caller is cluster-aware."""
+    import time
+    return PeerClockResponse(ts=time.time())

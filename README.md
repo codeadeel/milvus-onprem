@@ -93,61 +93,25 @@ rolling MinIO recreate, and nginx reload automatically.
 For the full walkthrough with hardware-validated outputs:
 **[docs/TUTORIAL.md](docs/TUTORIAL.md)**.
 
-## Feature matrix
+## CLI
 
-| Category | Feature | 2.5 | 2.6 |
-|---|---|---|---|
-| **Deploy** | `init --mode=distributed` | ✅ | ✅ |
-| | `init --mode=standalone` | ✅ | ✅ |
-| | `preflight` (docker / disk / ports / inter-peer TCP) | ✅ | ✅ |
-| | Online `join` of new peer (1→N) | ✅ | ✅ |
-| | `join --resume` after partial / interrupted join | ✅ | ✅ |
-| | `teardown --full --force` | ✅ | ✅ |
-| **HA** | etcd Raft (tolerates `(N-1)/2` loss) | ✅ | ✅ |
-| | Distributed MinIO (erasure-coded) | ✅ | ✅ |
-| | Rolling MinIO recreate on grow / shrink | ✅ 93s seq | ✅ 93s seq |
-| | Single-node Milvus failure recovery | ✅ ~15-20s window with retry helper | ✅ invisible to SDK |
-| | Mixcoord active-standby promotion | ✅ <1.1s on N=4 | ➖ N/A |
-| | Permanently-lost-node recovery | ✅ | ✅ |
-| | Daemon leader failover (etcd lease) | ✅ ~15s | ✅ ~15s |
-| **Scale** | `remove-node --ip=<peer>` (online shrink) | ✅ | ✅ |
-| | Even cluster sizes (N=4) accepted with warning | ✅ | ✅ |
-| | N=1, 3, 5, 7, 9 supported | 1/3 ✅, others 📖 | 1/3 ✅, others 📖 |
-| **Backup** | `backup-etcd` (concurrent-safe) | ✅ | ✅ |
-| | `create-backup` (with name regex + dup pre-flight) | ✅ | ✅ |
-| | `export-backup --to=` (lands on invoking peer) | ✅ | ✅ |
-| | `restore-backup --rename --load` | ✅ | ✅ |
-| | `restore-backup --collections=` filter | ⚠️ upstream quirk | ⚠️ upstream quirk |
-| | `restore-backup --drop-existing` | ✅ | ✅ |
-| | `restore-backup --no-restore-index` | ✅ | ✅ |
-| | Cross-version restore (2.5 backup → 2.6) | ✅ | ✅ |
-| | `MILVUS_BACKUP_VERSION` pin | ✅ | ✅ |
-| **Upgrade** | Same-major rolling `upgrade --milvus-version=` | ✅ | ✅ 48s on N=4 |
-| | Cross-major refusal (with helpful error) | ✅ | ✅ |
-| | Cluster-wide version anchor in etcd | ✅ | ✅ |
-| | Multi-version coexistence guard at render time | ✅ | ✅ |
-| **Watchdog** | Local: docker-restart unhealthy `milvus-*` containers | ✅ | ✅ |
-| | Loop guard (3 restarts in 5min → halt) | ✅ | ✅ |
-| | `WATCHDOG_MODE=monitor` (alerts only, no restart) | ✅ | ✅ |
-| | Peer-down alerts (TCP probe :19500) | ✅ | ✅ |
-| | Threshold tuning (`WATCHDOG_*` env vars) | ✅ | ✅ |
-| | Stuck-running job sweep (heartbeat-lease, F5.2) | ✅ ~77s | ✅ ~77s |
-| **Auth** | Bearer-token (`secrets.compare_digest` constant-time) | ✅ | ✅ |
-| | `rotate-token` (atomic across-peer) | ✅ | ✅ 19s on N=4 |
-| | TLS / mTLS | ❌ not yet | ❌ not yet |
-| **Air-gap** | `*_IMAGE_REPO` overrides for private registries | ✅ | ✅ |
-| | Cloud-agnostic (no `gcloud` / `aws` / `az` calls) | ✅ | ✅ |
-| | Direct-IP only (no DNS dependencies) | ✅ | ✅ |
-| **Day-2** | `status` / `urls` / `version` / `ps` / `logs` / `smoke` / `wait` | ✅ | ✅ |
-| | `jobs list/show/cancel/types` (daemon job introspection) | ✅ | ✅ |
-| | `maintenance` (prune-images / prune-logs / prune-etcd-jobs) | ✅ | ✅ |
-| | Operator hygiene `/admin/sweep` endpoint | ✅ | ✅ |
-| **2.5-only** | mixcoord `enableActiveStandby: true` on all 4 coords | ✅ | ➖ |
-| | Per-component healthchecks (TCP probe via bash /dev/tcp) | ✅ | ➖ |
-| | Pulsar singleton on `PULSAR_HOST` | ✅ | ➖ |
-| | Pulsar HA (3 ZK + 3 BK + 3 broker) | ❌ design-only | ➖ |
+Every operator action is one `./milvus-onprem <command>`. Common ones:
 
-Legend: ✅ live-validated · 📖 logic-reviewed · ⚠️ works with caveats · ❌ not implemented · ➖ N/A
+```bash
+./milvus-onprem preflight                             # pre-deploy sanity check
+./milvus-onprem init --mode=distributed               # set up this node
+./milvus-onprem join <leader-ip>:19500 <token>        # join an existing cluster
+./milvus-onprem status                                # local + peer health
+./milvus-onprem smoke                                 # functional test
+./milvus-onprem create-backup --name=daily_2026_04_29
+./milvus-onprem upgrade --milvus-version=v2.6.12
+./milvus-onprem remove-node --ip=<peer>
+./milvus-onprem rotate-token
+```
+
+Full reference: **[docs/CLI.md](docs/CLI.md)**.
+
+Per-command help: `./milvus-onprem <command> --help`.
 
 ## Supported environments
 
@@ -188,15 +152,14 @@ angle. Useful as a transient state during scale-out.
 | Read this | When |
 |---|---|
 | **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)** | **First-time deploy.** Prerequisites, install, init, join, smoke. ~15 min. |
-| [docs/TUTORIAL.md](docs/TUTORIAL.md) | Deeper walkthrough — every shipped feature on a real 4-VM cluster, with hardware-validated outputs. |
+| [docs/CLI.md](docs/CLI.md) | Every CLI command, every flag, with examples. |
+| [docs/TUTORIAL.md](docs/TUTORIAL.md) | Deeper walkthrough — every shipped feature on a real 4-VM cluster. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the components fit together. Read this when something surprises you. |
 | [docs/CONFIG.md](docs/CONFIG.md) | `cluster.env` reference. Every variable, every default. |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-2 ops: backup, scale-out, status, alert formats. |
 | [docs/FAILOVER.md](docs/FAILOVER.md) | What happens when a node dies. 2.5 vs 2.6 behavior + retry pattern. |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → fix table. Real bugs we've actually hit. |
-| [docs/CONTROL_PLANE.md](docs/CONTROL_PLANE.md) | Daemon internals: leader election, jobs, watchdog, design rationale. |
-| [docs/PULSAR_HA.md](docs/PULSAR_HA.md) | Design for in-cluster Pulsar HA on 2.5 (not yet implemented). |
-| [docs/QA_REPORT.md](docs/QA_REPORT.md) | The 9-round QA audit trail: 23 findings, 25 fixes. |
+| [docs/CONTROL_PLANE.md](docs/CONTROL_PLANE.md) | Daemon architecture: leader election, jobs, watchdog. |
 | [daemon/README.md](daemon/README.md) | Per-file walkthrough of the Python daemon. |
 | [test/tutorial/README.md](test/tutorial/README.md) | 10-step pymilvus walkthrough for app developers. |
 

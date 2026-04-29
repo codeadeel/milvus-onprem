@@ -282,10 +282,10 @@ UPSTREAM BINARY:
                                  metadata, then exit. Doesn't run a restore.
 
 Typical 100 GB-from-developer scenario:
-  scp -r dev_backup operator@node-1:~/dev_backup
-  ssh operator@node-1
-  cd ~/milvus-onprem
-  ./milvus-onprem restore-backup --from ~/dev_backup
+  # 1. Get the backup directory onto any peer (use whatever transport
+  #    your environment supports — shared NFS, object copy, USB, etc).
+  # 2. From that peer, run:
+  ./milvus-onprem restore-backup --from /path/to/dev_backup
 EOF
 }
 

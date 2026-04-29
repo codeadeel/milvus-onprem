@@ -8,7 +8,7 @@
 #
 # After this command returns successfully, the leaving peer's containers
 # are still running but orphaned at the cluster level. Operator follow-
-# up: ssh into that VM and run `./milvus-onprem teardown --full --force`
+# up: on the leaving VM, run `./milvus-onprem teardown --full --force`
 # to clean up local state.
 #
 # Refuses to run if:
@@ -81,7 +81,7 @@ EOF
       echo "  3. Drop ${ip} from every other peer's render + nginx upstream"
       echo ""
       echo "After this completes, the leaving peer's containers are orphaned."
-      echo "You'll need to ssh to ${ip} and run teardown --full --force."
+      echo "You'll need to run \`./milvus-onprem teardown --full --force\` on ${ip}."
       echo ""
       read -r -p "Type 'yes' to proceed: " ans
       [[ "$ans" == "yes" ]] || { info "aborted"; return 1; }

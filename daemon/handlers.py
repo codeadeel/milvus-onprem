@@ -336,9 +336,9 @@ def _upsert_kv(path: str, key: str, value: str) -> None:
     renames so partial writes don't leave the file half-edited. We
     preserve the original file's UID/GID and mode — important
     because the daemon runs as root in its container, while
-    cluster.env on the host is owned by `adeel`. Without preserving
-    ownership, the operator's CLI loses read access after the daemon
-    edits it.
+    cluster.env on the host is owned by the operator's Linux user.
+    Without preserving ownership, the operator's CLI loses read
+    access after the daemon edits it.
     """
     st = os.stat(path)
     with open(path, "r") as f:

@@ -38,54 +38,42 @@ usage() {
   cat <<EOF
 Usage: milvus-onprem <command> [options]
 
-  init             Generate cluster.env on this node. Required first step.
+  init             Initialise this node. Run on the first VM (--mode=distributed)
+                   or single-VM deploys (--mode=standalone). Required first step.
+  join             Join a running cluster. Run on every other VM with the
+                   token printed by the bootstrap node's init.
+  preflight        Pre-deploy sanity check (docker / disk / ports / inter-peer TCP).
+                   Auto-runs at the top of init/join.
+
+  bootstrap        Render + up + wait + create bucket. Idempotent.
   render           Re-render templates after editing cluster.env.
   up               Start all containers on this node.
-  down             Stop all containers on this node (data preserved).
-  bootstrap        Render + up + wait + create bucket. The "deploy everything" command.
-  status           Show this node + cluster health.
-  wait             Block until cluster fully converges.
-  teardown         Destructive: stop + wipe data. --full also removes cluster.env.
+  down             Stop all containers (data preserved).
+  status           Local + cluster health.
+  wait             Block until cluster converges.
+  teardown         Stop + wipe. --full also removes cluster.env.
 
-  pair             (bootstrap node) Serve cluster.env to peers via HTTP rendezvous.
-  join             (other peers) Fetch cluster.env from bootstrap node and bootstrap.
-                   Pass --existing to join a cluster that's already running.
+  remove-node      Gracefully remove a peer (distributed mode only).
+  rotate-token     Rotate CLUSTER_TOKEN atomically across every peer.
 
-  add-node         (legacy, pre-control-plane) Add a node via etcd member-add.
-                   For MODE=distributed, just run 'join' on the new VM instead.
-  update-peers     (legacy) Propagate updated PEER_IPS to existing peers.
-                   Auto-handled by the daemon's topology watch in distributed mode.
-  remove-node      Gracefully remove a peer: drain MinIO pool, etcd
-                   member-remove, topology delete. Distributed mode only.
+  backup-etcd      Snapshot etcd to a .db file.
+  create-backup    milvus-backup snapshot of live data (stored in MinIO).
+  export-backup    Copy a backup from MinIO to a filesystem dir.
+  restore-backup   Import a milvus-backup snapshot.
 
-  backup-etcd      Snapshot the local etcd store to a .db file.
-  create-backup    Take a milvus-backup snapshot of the live data (stored in MinIO).
-  export-backup    Copy a backup from MinIO to a filesystem dir (USB / NFS / off-site).
-  restore-backup   Import a milvus-backup snapshot (use --load to make queryable).
-  jobs             Manage daemon-orchestrated jobs:
-                     jobs list [--state=...] / jobs show <id> / jobs cancel <id>
-                     jobs types     (registered worker types)
+  upgrade          Rolling Milvus image-tag upgrade (same major.minor).
+  jobs             Manage daemon jobs: list / show / cancel / types.
 
-  smoke            Run the end-to-end smoke test (replica_number auto-derived).
-  version          Show CLI + configured-cluster version info.
-  urls             Print the connection URLs (LB, MinIO console, etc.).
-  ps               Show running milvus-* containers (filtered docker ps).
-  logs             Tail logs for a component (etcd / minio / milvus / nginx / pulsar).
+  smoke            End-to-end smoke test against the LB.
+  version          CLI + image tag versions.
+  urls             Connection URLs to share with clients.
+  ps               docker ps filtered to milvus-*.
+  logs             Tail logs for a component.
 
   install          Drop the CLI on PATH + bash completion (system-wide).
-                   Pass --with-watchdog to also install the alert-mode systemd unit.
-  uninstall        Reverse of install (does not touch data — see teardown).
-  watchdog         Long-running peer-down poller (used by milvus-watchdog.service).
-
-  maintenance      Operator hygiene: prune dangling docker images, truncate
-                   container logs, force etcd-jobs sweep. See --help.
-  rotate-token     Rotate CLUSTER_TOKEN atomically across every peer
-                   (distributed mode). Avoids the per-peer rotation window
-                   where daemon-to-daemon RPCs would otherwise fail.
-  preflight        Pre-deploy sanity check: docker / disk / required ports
-                   free / inter-peer TCP. Run before init or any time to
-                   diagnose. Auto-runs at the top of init/join unless
-                   you pass --skip-preflight to those commands.
+  uninstall        Reverse of install (data untouched — see teardown).
+  watchdog         Standalone peer-down poller (legacy; daemon includes one).
+  maintenance      Operator hygiene: prune-images / prune-logs / prune-etcd-jobs.
 
   help             Show this message.
 
@@ -108,10 +96,7 @@ main() {
     status)          cmd_status          "$@" ;;
     wait)            cmd_wait            "$@" ;;
     teardown)        cmd_teardown        "$@" ;;
-    pair)            cmd_pair            "$@" ;;
     join)            cmd_join            "$@" ;;
-    add-node)        cmd_add_node        "$@" ;;
-    update-peers)    cmd_update_peers    "$@" ;;
     backup-etcd)     cmd_backup_etcd     "$@" ;;
     create-backup)   cmd_create_backup   "$@" ;;
     export-backup)   cmd_export_backup   "$@" ;;

@@ -183,7 +183,7 @@ flowchart LR
     C2 --> C3[restart loop]
     C3 --> C1
   end
-  subgraph good["enableActiveStandby: true (what we ship)"]
+  subgraph good["enableActiveStandby: true (shipped default)"]
     D1[m1 mixcoord<br/>wins CAS] --> D2[m1 ACTIVE]
     E1[m2 mixcoord] -- loses --> E2[STANDBY<br/>watch lease]
     F1[m3 mixcoord] -- loses --> F2[STANDBY<br/>watch lease]

@@ -1,22 +1,19 @@
-# milvus-onprem — end-to-end tutorial
+# Tutorial
 
-A walked-through guide that exercises every shipped feature of
-milvus-onprem v1.2 on a real 4-VM cluster, both Milvus 2.5 and 2.6.
-Each section is small and stands alone — you can read top-to-bottom
-or jump to the operation you need.
+End-to-end walkthrough that exercises every shipped feature on a
+real 4-VM cluster, on both Milvus 2.5 and 2.6. Each section stands
+alone — read top to bottom or jump to the operation you need.
 
-> **First-time deploy?** Start with the shorter
-> **[GETTING_STARTED.md](GETTING_STARTED.md)** (~15 min). This tutorial
-> is the deeper walkthrough that exercises every feature.
+For a faster first-deploy path see
+**[GETTING_STARTED.md](GETTING_STARTED.md)** (~15 min). For per-command
+reference see **[CLI.md](CLI.md)**.
 
-> **Audience:** an operator who has Docker installed on N Linux VMs
-> in the same private subnet and wants HA Milvus without Kubernetes.
-> No prior milvus-onprem knowledge assumed.
+Examples in this tutorial assume:
 
-> **Hardware-validated:** every command in this tutorial was run on
-> a 4-VM cluster (10.0.0.2 / 10.0.0.3 / 10.0.0.4 / 10.0.0.5) before
-> being written here. Any output samples shown are real (timestamps
-> from the 2026-04-28 validation pass on Milvus 2.6.11 + 2.5.4).
+- 4 VMs in the same private subnet (`10.0.0.2`–`10.0.0.5` here).
+- Docker installed and running on each VM.
+- The repo cloned at `~/milvus-onprem` on each VM.
+- Inter-peer TCP open on `2379, 2380, 9000, 9091, 19500, 19530, 19537`.
 
 ## Table of contents
 
@@ -91,25 +88,23 @@ erasure-coded mode. Nginx layer-4-load-balances the gRPC entry port.
 
 ### Two big choices when you start
 
-1. **`MILVUS_VERSION` (2.5 vs 2.6).** 2.6 is the recommended path —
-   embedded Woodpecker WAL, no Pulsar, simpler topology (4 containers
-   per node). 2.5 needs a Pulsar broker (singleton SPOF for writes
-   unless you wire HA Pulsar separately) and runs 5 milvus-* sibling
-   containers per node (mixcoord/proxy/querynode/datanode/indexnode).
-   Use 2.5 only if you have existing 2.5 data or library compat
-   constraints.
+1. **`MILVUS_VERSION` (2.5 vs 2.6).** 2.6 is the recommended path:
+   embedded Woodpecker WAL, no Pulsar, 5 containers per node. 2.5
+   needs a Pulsar broker (singleton SPOF for writes unless you point
+   at an external HA Pulsar) and runs 5 milvus-* sibling containers
+   per node (mixcoord/proxy/querynode/datanode/indexnode). Pick 2.5
+   only when you have existing 2.5 data or library compat constraints.
 2. **`CLUSTER_SIZE` (1, 3, 5, 7, 9).** 1 = standalone, no HA. 3 is
-   the smallest HA size (Raft quorum). Even sizes (2, 4, 6) are
-   accepted with a warning — they tolerate the same failures as
-   the next-lower odd size, so 4 ≈ 3 from a fault-tolerance angle.
+   the smallest HA size (Raft quorum). Even sizes (2, 4, 6) tolerate
+   the same failures as the next-lower odd size and are accepted
+   with a warning — useful as a transient state during scale-out.
 
 ### Two modes
 
-- **`init --mode=standalone`** — single-VM. No daemon. Just docker
-  compose. Use for dev / smoke / single-host deploys.
-- **`init --mode=distributed`** — N-VM HA. Boots the control-plane
-  daemon. Use for everything beyond a single VM. **This tutorial
-  uses distributed mode throughout.**
+- **`init --mode=standalone`** — single VM, no daemon, just docker
+  compose. For dev / smoke / single-host deploys.
+- **`init --mode=distributed`** — N-VM HA, boots the control-plane
+  daemon. **This tutorial uses distributed mode throughout.**
 
 ## 2. Phase A — bootstrap 2.6 N=3
 
@@ -145,8 +140,8 @@ Save that one-liner — you'll paste it on m2/m3.
 ### A.2 Verify m1 came up clean
 
 ```bash
-./milvus-onprem status        # all 4 local services should be [OK]
-./milvus-onprem ps            # 4 containers: milvus, milvus-etcd, milvus-minio, milvus-nginx, milvus-onprem-cp
+./milvus-onprem status        # all local services should be [OK]
+./milvus-onprem ps            # 5 containers: milvus, milvus-etcd, milvus-minio, milvus-nginx, milvus-onprem-cp
 docker logs milvus-onprem-cp 2>&1 | tail -20
 ```
 
@@ -265,8 +260,7 @@ cd ~/milvus-onprem
 ./milvus-onprem join 10.0.0.2:19500 <CLUSTER_TOKEN>
 ```
 
-That's it. No "add-node" command needed — the daemon-driven `/join`
-flow handles everything:
+The daemon-driven `/join` flow handles everything:
 
 ```mermaid
 flowchart TB
@@ -470,10 +464,10 @@ loop guard at 3 restarts in 5 min).
 
 ### G.1 Peer-down drill
 
-Stop m3's daemon:
+On m3, stop the daemon:
 
 ```bash
-ssh m3 'docker stop milvus-onprem-cp'
+docker stop milvus-onprem-cp
 ```
 
 On m1, watch:
@@ -488,10 +482,10 @@ After ~60s (6 missed probes × 10s):
 PEER_DOWN_ALERT ts=<unix> node=node-3 ip=10.0.0.4 consecutive_failures=6
 ```
 
-Bring m3 back:
+Back on m3, bring the daemon back:
 
 ```bash
-ssh m3 'docker start milvus-onprem-cp'
+docker start milvus-onprem-cp
 ```
 
 Within ~10s:
@@ -623,10 +617,15 @@ It only retries known recovery-class messages (default budget 120s).
 ### H.3 mixcoord active-standby (2.5 only)
 
 ```bash
-ssh m2 'docker stop milvus-mixcoord'
-ssh m1 'docker logs milvus-mixcoord --since=10s | grep STANDBY'
+# On m2 (active leader): stop the mixcoord container
+docker stop milvus-mixcoord
+
+# On m1 (standby): tail the local log to watch the promotion
+docker logs milvus-mixcoord --since=10s | grep STANDBY
 # observed: "querycoord quit STANDBY mode, this node will become ACTIVE"
-ssh m2 'docker start milvus-mixcoord'
+
+# Back on m2: bring the standby back
+docker start milvus-mixcoord
 ```
 
 On hardware drill, promotion happens in ~500ms thanks to
@@ -686,15 +685,13 @@ port via bash `/dev/tcp`).
 
 ### I.3 The Pulsar SPOF
 
-Milvus 2.5 needs Pulsar. Our singleton runs on `PULSAR_HOST`
+Milvus 2.5 needs Pulsar. The singleton runs on `PULSAR_HOST`
 (default `node-1`). If that node dies, **writes stop** (reads from
-loaded collections continue). Three fixes:
+loaded collections continue). Two ways out:
 
 1. **Use Milvus 2.6 instead** — recommended.
 2. **Point at an external Pulsar cluster** — set
    `PULSAR_HOST=<external-ip>` and remove the local Pulsar service.
-3. **Run Pulsar HA in-cluster** — design captured in
-   [docs/PULSAR_HA.md](PULSAR_HA.md), implementation deferred.
 
 ### I.4 Run Phases C-G again
 
@@ -752,7 +749,5 @@ docker logs -f milvus-onprem-cp 2>&1 | grep -E 'PEER_(DOWN|UP)_ALERT|COMPONENT_'
   for known issues.
 - [docs/FAILOVER.md](FAILOVER.md) — failure-mode reference and
   retry helper.
-- [docs/CONTROL_PLANE.md](CONTROL_PLANE.md) — internals of the
-  daemon (leader election, jobs, watchdog).
-- [docs/PULSAR_HA.md](PULSAR_HA.md) — design for in-cluster Pulsar HA
-  on 2.5 (not yet implemented).
+- [docs/CONTROL_PLANE.md](CONTROL_PLANE.md) — daemon architecture
+  (leader election, jobs, watchdog).

@@ -11,7 +11,7 @@ debugging order is:
 
 For day-2 operational tasks, see [OPERATIONS.md](OPERATIONS.md).
 
-## Init / pair / join issues
+## Init / join issues
 
 ### Milvus 2.5 panics with `CompareAndSwap error ... for key: rootcoord`
 
@@ -21,56 +21,42 @@ multiple instances against a shared etcd — that mode does not support
 multi-instance HA. Every instance races to register itself as
 rootcoord; the N-1 losers panic and restart in a loop.
 
-Fix: use the coord-mode-cluster topology this tool ships in
-`templates/2.5/`. A correct 2.5 multi-node deploy runs
-`mixcoord` + `proxy` + `querynode` + `datanode` + `indexnode` per
-node (5 milvus-* containers, each in its own role), which is exactly
-the topology Milvus 2.5 was designed for. `milvus-onprem ps` on a
-healthy 2.5 multi-node cluster shows these 5 containers plus
-`milvus-etcd` / `milvus-minio` / `milvus-nginx` (and
+Fix: use the coord-mode-cluster topology in `templates/2.5/`. A
+correct 2.5 multi-node deploy runs `mixcoord` + `proxy` +
+`querynode` + `datanode` + `indexnode` per node (5 milvus-*
+containers, each in its own role). `milvus-onprem ps` on a healthy
+2.5 multi-node cluster shows these 5 containers plus `milvus-etcd`
+/ `milvus-minio` / `milvus-nginx` / `milvus-onprem-cp` (and
 `milvus-pulsar` on PULSAR_HOST).
 
-If you previously initialised with the single-`milvus`-container
-template, `teardown --full --force` and re-run `init` against the
-current `templates/2.5/`.
+If your render produces a single `milvus` service, run
+`teardown --full --force` and re-run `init` against `templates/2.5/`.
 
-### Milvus 2.5: `milvus-mixcoord` panics with `panic: function CompareAndSwap error ... for key: querycoord` (multi-mixcoord cycle)
+### Milvus 2.5: `milvus-mixcoord` panics with `panic: function CompareAndSwap error ... for key: querycoord`
 
-Different shape from the `milvus run standalone` case above. This one
-fires from `internal/util/sessionutil/session_util.go:318` during
-`(*Session).Register`. Symptom: in a 3-node 2.5 cluster, ONE node's
-`milvus-mixcoord` is stable and the other two ratchet up
-`docker inspect milvus-mixcoord --format '{{.RestartCount}}'`
-indefinitely.
+Symptom: in a 3-node 2.5 cluster, one peer's `milvus-mixcoord` is
+stable and the other two restart-loop indefinitely
+(`docker inspect milvus-mixcoord --format '{{.RestartCount}}'`
+keeps growing). Panic fires from
+`internal/util/sessionutil/session_util.go:318`.
 
-Cause: `enableActiveStandby` defaults to `false` upstream. When
-mixcoord N+1 starts and tries to register at
-`by-dev/meta/session/<coord>`, the etcd CompareAndSwap returns
-`compare=false` (key already held by the leader); the session
-helper hits the 30-retry budget and PANICS rather than entering
-standby mode. `restart: always` re-launches it; same fate; loop.
+Fix: `templates/2.5/milvus.yaml.tpl` ships `enableActiveStandby:
+true` on `rootCoord`, `dataCoord`, `queryCoord`, and `indexCoord`.
+If your render is missing this, re-render with the current template
+and `docker restart milvus-mixcoord` on each peer (rolling: hit the
+standbys first, then the active leader).
 
-The cluster *appears* to work because the data-plane workers
-(querynode/datanode/indexnode/proxy) use suffixed session keys
-(`querynode-NNN`) that don't collide. But there's no warm standby
-mixcoord — if the live leader dies, coord-down for many seconds
-until docker happens to restart-cycle a survivor into the slot.
+Each peer's mixcoord then sits in ACTIVE or STANDBY state per coord;
+the 4 coord roles are independently elected and failover drills at
+<500ms.
 
-Fix shipped in `templates/2.5/milvus.yaml.tpl`: set
-`enableActiveStandby: true` on `rootCoord`, `dataCoord`, `queryCoord`,
-and `indexCoord`. Re-render and `docker restart milvus-mixcoord` on
-each peer (rolling: hit the standbys first, then the active leader).
+### `init`: `--mode is required`
 
-After the fix, m1+m2+m3 each run mixcoord in either ACTIVE or STANDBY
-state per coord; the 4 coord roles are independently elected (leader
-can be split across nodes). Failover drilled at <500ms.
-
-### `init`: `--peer-ips is required`
-
-You ran `init` with no flags. Pass at least `--peer-ips`:
+`init` runs interactively if stdin is a TTY; otherwise pass `--mode`:
 
 ```bash
-./milvus-onprem init --peer-ips=10.0.0.10,10.0.0.11,10.0.0.12
+./milvus-onprem init --mode=distributed   # multi-VM HA
+./milvus-onprem init --mode=standalone    # single VM, no HA
 ```
 
 ### `init`: `cluster.env already exists at ...`
@@ -89,39 +75,28 @@ Either:
 Even-numbered cluster sizes (2, 4, 6) are rejected — see
 [ARCHITECTURE.md](ARCHITECTURE.md#why-cluster-size-must-be-1-3-5).
 
-### `pair`: `cannot bind ...:19500: Address already in use`
+### `join`: HTTP timeout / connection refused
 
-Either an old `pair` server is still running, or another process has
-the port.
+The new VM can't reach an existing peer's daemon on `:19500`.
 
-```bash
-sudo ss -tlnp | grep 19500
-```
+- **Firewall.** Open port 19500 between peers. Verify with
+  `./milvus-onprem preflight --peer --peers=<peer-ip>` from the
+  joining VM.
+- **Daemon not up yet.** Check `docker ps` on the target peer.
+  `docker logs milvus-onprem-cp` should show `acquired leadership`
+  or `following <leader>`.
 
-Kill the offending process. Or use a different port:
+### `join`: 401 / 403 from /join
 
-```bash
-PAIR_PORT=19501 ./milvus-onprem pair
-# and adjust the join command on each peer accordingly
-```
+Token mismatch.
 
-### `join`: `fetch failed`
-
-Several causes, in order of likelihood:
-
-- **Token typo.** Tokens are 32 hex chars. Copy-paste, don't retype.
-- **Pair server already exited.** It exits after `(N-1)` fetches OR
-  10 minutes idle. Re-run `./milvus-onprem pair` on the bootstrap
-  node to mint a fresh token.
-- **Firewall blocks port 19500.** Verify reachability:
-  `nc -zv <bootstrap-ip> 19500` from the joining peer.
-
-### `join`: `fetched file doesn't look like cluster.env (missing PEER_IPS)`
-
-The pair server served something other than a valid `cluster.env`.
-Usually means the bootstrap node's `cluster.env` was edited mid-pair
-(don't do that), or hand-copied incorrectly. Re-run pair from scratch
-on a clean cluster.env.
+- **Token typo or stale.** Retrieve the current `CLUSTER_TOKEN` from
+  any existing peer's `cluster.env` — that's the source of truth. If
+  the cluster has been rotated (`rotate-token`), the old token is
+  invalid.
+- **Bearer header missing or malformed.** The CLI handles this; if
+  you're hand-crafting a `curl`, use
+  `Authorization: Bearer <CLUSTER_TOKEN>`.
 
 ### `init` / `join`: `could not match hostname -I against PEER_IPS`
 
@@ -141,48 +116,24 @@ FORCE_NODE_INDEX=N ./milvus-onprem init ...
 
 where N is the 1-based position of this node's IP in PEER_IPS.
 
-## Scale-out / add-node issues
+## Scale-out issues
 
-### `CLUSTER_SIZE=N invalid: must be 1 (standalone) or odd ≥3` after add-node
+### `CLUSTER_SIZE=N invalid` after a `join`
 
-Symptom: you run `add-node` to grow 3→4 (or 5→6), then `status` /
-`bootstrap` / `join --existing` on any peer dies with:
+Symptom: after a `join` grows a cluster from `3→4` (or `5→6`),
+subsequent commands die with:
 
 ```
-ERROR CLUSTER_SIZE=4 invalid: must be 1 (standalone) or odd ≥3 (3, 5, 7, 9). PEER_IPS=...
+ERROR CLUSTER_SIZE=4 invalid: must be 1 (standalone) or odd ≥3 ...
 ```
 
-Cause: previously, `lib/role.sh:role_validate_size` enforced "odd
-only" on every command. That's correct as an *init-time* user-config
-rule (you wouldn't deploy a 4-node cluster from scratch — even
-sizes have worse Raft tolerance than the next-lower odd) — but
-wrong as a *runtime* rule, because scale-out **must** transit
-through even sizes (etcd member-add is one-at-a-time).
+`join` adds peers one at a time, so even sizes are a transient state
+during scale-out. The shipped `role_validate_size` allows any size
+≥ 1 at runtime and prints a WARN line on even sizes — the init-time
+odd-only rule (in `cmd_init.sh`) still applies because you wouldn't
+deploy a 4-node cluster from scratch (worse Raft tolerance than 3).
 
-Fix: `role_validate_size` now allows any size ≥ 1, and prints a
-WARN line on even sizes pointing the operator at "plan another
-add-node to reach the next odd size." The init-time odd-only rule
-is unchanged (still enforced in `cmd_init.sh:50`).
-
-If you're hitting this on an older clone, `git pull` to pick up
-the fix, or apply this patch by hand to `lib/role.sh`:
-
-```bash
-role_validate_size() {
-  case "$CLUSTER_SIZE" in
-    1) return 0 ;;
-    [0-9]|[0-9][0-9])
-      if (( CLUSTER_SIZE < 1 )); then
-        die "CLUSTER_SIZE=$CLUSTER_SIZE invalid"
-      fi
-      if (( CLUSTER_SIZE % 2 == 0 )); then
-        warn "CLUSTER_SIZE=$CLUSTER_SIZE is even — transient mid-scale-out state"
-      fi
-      return 0 ;;
-    *) die "CLUSTER_SIZE=$CLUSTER_SIZE invalid" ;;
-  esac
-}
-```
+If you see the hard error, `git pull` to pick up the current code.
 
 ## Bootstrap / lifecycle issues
 
@@ -199,12 +150,11 @@ to a prompt, `docker ps -a` shows only `milvus-etcd` and `milvus-minio`,
 no `milvus` or `milvus-nginx` containers were ever created, and
 `docker images` shows no `milvusdb/milvus` pull was attempted.
 
-Root cause: in the `pair`/`join` flow the peer hits Stage 3 (distributed
-MinIO peer-reach wait) before the bootstrap node has run its own
-`bootstrap`. The wait times out, and an unguarded `_wait_peers_minio_reachable`
-under `set -e` used to abort the bootstrap before Stage 4. Both Stage 3
-waits are now `|| warn`-guarded so peers proceed to start Milvus and
-nginx even when the mesh isn't fully formed yet.
+Root cause: the joining peer hits Stage 3 (distributed MinIO
+peer-reach wait) before the bootstrap node's MinIO is fully up.
+Stage 3's MinIO peer-reach waits are `|| warn`-guarded so peers
+proceed to start Milvus and nginx even when the mesh isn't fully
+formed yet.
 
 Recovery on a deployed cluster: re-run `./milvus-onprem bootstrap` on
 the affected peer once the bootstrap node's MinIO is up. Bootstrap is
@@ -284,42 +234,39 @@ docker start milvus-pulsar
 
 You set `MQ_TYPE=pulsar` in cluster.env on a 2.6 deploy. The 2.6
 templates only ship a Woodpecker path — there's no Pulsar service
-block in `templates/2.6/docker-compose.yml.tpl`. As of this build the
-combination is rejected at `env_require` time with a clear message:
+block in `templates/2.6/docker-compose.yml.tpl`. The combination is
+rejected at `env_require` time:
 
 ```
 ERROR Milvus 2.6 + MQ_TYPE=pulsar is not wired up in this build ...
 ```
 
-If you actually need Pulsar, run Milvus 2.5 instead
-(`MILVUS_IMAGE_TAG=v2.5.x`). 2.6's recommended path is the embedded
-Woodpecker WAL.
+If you need Pulsar, run Milvus 2.5 (`MILVUS_IMAGE_TAG=v2.5.x`).
+Otherwise drop `MQ_TYPE=pulsar` from cluster.env to use Woodpecker
+(the 2.6 default).
 
-### `teardown` errors out before it gets a chance to clean up
+### `teardown` errors out before it cleans up
 
-If you tripped a config-validation rule (e.g. set MQ_TYPE wrong, or a
-hand-edited PEER_IPS that's no longer odd-count), `teardown` is
-deliberately lenient and will proceed even though normal commands
-refuse — that's its job as the escape hatch. If you're seeing the old
-behaviour where `teardown` itself bounces on validation, you're on a
-pre-fix build; pull main or sweep manually:
+`teardown` is deliberately lenient and proceeds even when other
+commands refuse on validation — that's the escape hatch. If for some
+reason it can't run, sweep manually:
 
 ```bash
-docker rm -f milvus milvus-nginx milvus-minio milvus-etcd milvus-pulsar
+docker rm -f milvus milvus-nginx milvus-minio milvus-etcd milvus-pulsar milvus-onprem-cp
 sudo rm -rf /data/{etcd,minio,milvus,pulsar}
 rm -f cluster.env
 rm -rf rendered/
 ```
 
-### `backup-etcd` errors with `exec: "rm": executable file not found in $PATH`
+### `backup-etcd` leaves a stray `/data/etcd/snapshot.db`
 
-Pre-fix symptom: snapshot file makes it to /tmp but `set -e` kills the
-function before it confirms, and `/data/etcd/snapshot.db` is left
-behind inside the etcd data dir. Cause: the etcd image is distroless
-and has no `rm` binary, so the post-snapshot in-container cleanup
-fails. Fixed by cleaning up via the bind mount (`sudo rm -f
-${DATA_ROOT}/etcd/snapshot.db`). If you're stuck on a pre-fix build,
-that same command clears the leftover.
+The etcd image is distroless and has no `rm` binary, so in-container
+cleanup of the snapshot tempfile won't work. Clean up via the bind
+mount on the host:
+
+```bash
+sudo rm -f ${DATA_ROOT}/etcd/snapshot.db
+```
 
 ## etcd issues
 
@@ -391,11 +338,10 @@ fails but `daily_backup` works.
 
 ### `Unable to stat source <host-path>` during restore-backup --from
 
-`mc` runs **inside** the milvus-minio container and can't see host
-filesystem paths directly. The CLI handles this internally via
-`docker cp` host → container → MinIO. If you see this error, you're
-running an older version of `lib/cmd_restore_backup.sh` — pull
-the latest commit.
+`mc` runs inside the milvus-minio container and can't see host
+filesystem paths directly. The CLI bridges this via
+`docker cp` host → container → MinIO. If you're hitting this error,
+`git pull` the latest CLI.
 
 ### `restore-backup` fails with `restore: collection already exist`
 
@@ -431,9 +377,9 @@ embedded in every Milvus instance.
 ### milvus-backup config errors / `config: backup.yaml`
 
 milvus-backup v0.5.x uses YAML, not TOML. The CLI generates
-`backup.yaml` automatically. If you're seeing a TOML-related error,
-you're on an older checkout — pull the latest. The file is rendered
-at `~/milvus-onprem/.local/backup.yaml` per invocation.
+`backup.yaml` automatically at `~/milvus-onprem/.local/backup.yaml`
+per invocation. If you're seeing a TOML-related error, `git pull`
+the latest CLI.
 
 ## Tutorial / smoke issues
 
@@ -503,8 +449,11 @@ You lose all data unless you've been taking `create-backup` snapshots.
 Restore from those:
 
 ```bash
-./milvus-onprem init --peer-ips=...
-# (pair / join / bootstrap as usual)
+# on the bootstrap VM:
+./milvus-onprem init --mode=distributed
+# on every other VM:
+./milvus-onprem join <bootstrap-ip>:19500 <CLUSTER_TOKEN>
+# back on any peer:
 ./milvus-onprem restore-backup --from=<your-backup-dir>
 ```
 
@@ -541,12 +490,9 @@ sequenceDiagram
   Survivor->>Etcd: add
   Etcd-->>Survivor: new member-id, status unstarted
 
-  Op->>Survivor: pair, issues token
-  Survivor-->>Op: token
-
-  Op->>Repl: join survivor:19500 token --existing
-  Repl->>Survivor: GET /cluster.env
-  Survivor-->>Repl: cluster.env
+  Op->>Repl: join survivor:19500 CLUSTER_TOKEN
+  Repl->>Survivor: POST /join (auth: bearer)
+  Survivor-->>Repl: cluster.env body
   Repl->>Repl: bootstrap with state=existing
   Repl->>Etcd: handshake matches the unstarted entry
   Etcd-->>Repl: accepted, Raft snapshot
@@ -606,22 +552,17 @@ On the replacement VM, repo cloned, no `cluster.env` yet:
 
 ```bash
 cd ~/milvus-onprem
-# on a healthy peer (e.g. m1):
-./milvus-onprem pair        # prints a token; will exit after fetches
-                            # OR after 10 min idle. Since only ONE
-                            # peer is fetching this time, expect the
-                            # pair-server to time out — that's OK.
+# Retrieve CLUSTER_TOKEN from any healthy peer's cluster.env (or
+# rotate the token first via `./milvus-onprem rotate-token` if you
+# want a clean break from the old one).
 
-# on the replacement:
-./milvus-onprem join <healthy-ip>:19500 <token> --existing
+./milvus-onprem join <healthy-ip>:19500 <CLUSTER_TOKEN>
 ```
 
-The `--existing` flag is critical — it sets
-`ETCD_INITIAL_CLUSTER_STATE=existing` so the replacement's etcd joins
-the running Raft cluster (using the member entry registered in
-Step 2) instead of trying to bootstrap a new one. Without
-`--existing`, the new etcd refuses to start because m1+m2's etcds are
-already past the bootstrap phase.
+The leader's `/join` response sets
+`ETCD_INITIAL_CLUSTER_STATE=existing` automatically, so the
+replacement's etcd joins the running Raft cluster (using the member
+entry registered in Step 2) instead of trying to bootstrap a new one.
 
 **Option B: new IP (different VM, same slot in `PEER_IPS`):**
 
@@ -699,8 +640,8 @@ What to do:
    automatically; the watchdog will resume normal monitoring.
 
 If the loop guard tripped on `milvus-mixcoord` specifically, see the
-2.5 mixcoord active-standby section above — that was the most common
-trigger before we shipped `enableActiveStandby: true`.
+2.5 mixcoord active-standby section above — a misconfigured standby
+flag is a common trigger.
 
 ### Reads fail with `code=106 collection on recovering` after a node restart
 

@@ -1,24 +1,15 @@
 # =============================================================================
 # lib/cmd_rotate_token.sh — atomic cluster-wide CLUSTER_TOKEN rotation
 #
-# QA finding F-R4-B.1: rotating CLUSTER_TOKEN one peer at a time leaves a
-# window where some peers have NEW + others have OLD, and daemon-to-daemon
-# RPCs (rolling MinIO, /upgrade-self, /recreate-minio-self) fail with 403
-# during that window. The bash CLI's per-peer rotation works, but operators
-# have to coordinate fast.
+# Submits a `rotate-token` job to the local control-plane daemon. The
+# leader's worker fans out to every follower in parallel via the
+# documented HTTP control plane (POST /rotate-self with the OLD bearer
+# token, body carries the NEW token); each peer writes cluster.env,
+# re-renders, and schedules a detached self-recreate of its own
+# control-plane container. Leader rotates itself last.
 #
-# This command does the right ordering automatically:
-#   1. Generate new token
-#   2. Update every peer's cluster.env (parallel scp + sed via SSH)
-#   3. Render on every peer (parallel)
-#   4. Force-recreate every peer's daemon (parallel — accepts the brief
-#      RPC dead-window because all daemons restart with the new token at
-#      roughly the same instant)
-#   5. Verify all peers respond to the new token; fail if any rejects
-#
-# This requires SSH from the operator host to every peer (the same SSH
-# the operator uses for normal multi-host work; we don't add new SSH
-# requirements). Standalone mode is a single-step.
+# Cross-peer transport is always HTTP+bearer; SSH between peers is
+# never assumed (production peers don't have it).
 # =============================================================================
 
 [[ -n "${_CMD_ROTATE_TOKEN_SH_LOADED:-}" ]] && return 0
@@ -40,23 +31,26 @@ Usage: milvus-onprem rotate-token [OPTIONS]
 Rotate the cluster-wide CLUSTER_TOKEN atomically across every peer.
 
   --new-token=KEY      Use this exact value (default: auto-generate).
-                       Must be at least 32 hex chars (256 bits).
+                       Must be at least 32 chars (256 bits).
   --force              Skip confirmation.
 
 What happens:
-  1. Generate (or accept) a new CLUSTER_TOKEN.
-  2. Update every peer's cluster.env (this peer first, then SSH to others).
-  3. Re-render every peer's compose.
-  4. Force-recreate every peer's control-plane daemon ~simultaneously.
-  5. Verify every peer accepts the new token.
+  1. The CLI submits a `rotate-token` job to the local daemon.
+  2. The leader's worker POSTs /rotate-self to every follower in
+     parallel (auth'd with the OLD token; body carries the NEW one).
+  3. Each peer writes cluster.env, re-renders, and schedules a
+     detached self-recreate of its control-plane container.
+  4. The leader rotates itself last; its own daemon recreates
+     ~5 seconds after the job returns.
+  5. The CLI verifies every peer accepts the new token.
 
-Requirements:
+Constraints:
   - distributed mode (rotation is meaningless in standalone)
-  - operator's SSH key on every peer's $HOME/.ssh/authorized_keys
+  - all peer daemons must be reachable from the leader
 
 If verification fails, the command stops immediately and prints which
 peer(s) didn't accept. Recovery: re-run with --new-token=<that value>
-to retry, or run teardown + redeploy in the worst case.
+to retry, or `teardown` + redeploy in the worst case.
 EOF
         return 0
         ;;
@@ -82,65 +76,71 @@ EOF
     echo ""
     echo "About to rotate CLUSTER_TOKEN across cluster $CLUSTER_NAME"
     echo "Peers: ${PEER_IPS}"
-    echo "All daemons will be restarted in parallel (~5-10s outage of"
+    echo "All daemons will recreate ~simultaneously (~5-10s outage of"
     echo "daemon-only operations; data plane unaffected)."
     read -rp "Continue? [y/N] " yn
     [[ "$yn" =~ ^[Yy] ]] || die "aborted"
   fi
 
-  # Step 1+2: update every peer's cluster.env in parallel
-  info "==> updating cluster.env on every peer"
-  local pids=() failures=0
-  for ip in ${PEER_IPS//,/ }; do
-    if [[ "$ip" == "$LOCAL_IP" ]]; then
-      sed -i "s/^CLUSTER_TOKEN=.*/CLUSTER_TOKEN=$new_token/" "$CLUSTER_ENV"
-    else
-      ( ssh -o StrictHostKeyChecking=no "adeel@$ip" \
-          "sed -i 's/^CLUSTER_TOKEN=.*/CLUSTER_TOKEN=$new_token/' /home/adeel/milvus-onprem/cluster.env" \
-          || exit 1 ) &
-      pids+=($!)
-    fi
-  done
-  for p in "${pids[@]}"; do wait "$p" || failures=$((failures + 1)); done
-  (( failures == 0 )) || die "failed to update cluster.env on $failures peer(s)"
+  _rotate_via_daemon "$new_token"
+}
 
-  # Step 3: re-render every peer
-  info "==> rendering on every peer"
-  pids=()
-  for ip in ${PEER_IPS//,/ }; do
-    if [[ "$ip" == "$LOCAL_IP" ]]; then
-      ( cd "$REPO_ROOT" && ./milvus-onprem render >/dev/null ) &
-    else
-      ( ssh "adeel@$ip" 'cd /home/adeel/milvus-onprem && ./milvus-onprem render >/dev/null' ) &
-    fi
-    pids+=($!)
-  done
-  for p in "${pids[@]}"; do wait "$p" || failures=$((failures + 1)); done
-  (( failures == 0 )) || die "render failed on $failures peer(s)"
+# Submit a rotate-token job and poll until done.
+_rotate_via_daemon() {
+  local new_token="$1"
+  local cp_url="http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}"
+  local token="${CLUSTER_TOKEN:-}"
+  [[ -n "$token" ]] || die "CLUSTER_TOKEN missing in cluster.env"
 
-  # Step 4: force-recreate daemon on every peer in parallel — minimises
-  # the dead window where some peers have new + others old.
-  info "==> recreating daemon on every peer (parallel)"
-  pids=()
-  for ip in ${PEER_IPS//,/ }; do
-    local node_dir="rendered/$(_rotate_node_name_for "$ip")"
-    if [[ "$ip" == "$LOCAL_IP" ]]; then
-      ( docker compose -f "$REPO_ROOT/$node_dir/docker-compose.yml" \
-          up -d --force-recreate --no-deps control-plane >/dev/null 2>&1 ) &
-    else
-      ( ssh "adeel@$ip" "cd /home/adeel/milvus-onprem/$node_dir && \
-          docker compose up -d --force-recreate --no-deps control-plane" \
-          >/dev/null 2>&1 ) &
-    fi
-    pids+=($!)
-  done
-  for p in "${pids[@]}"; do wait "$p" || failures=$((failures + 1)); done
-  (( failures == 0 )) || warn "$failures daemon(s) didn't recreate cleanly — verify manually"
+  local body
+  body=$(python3 -c "
+import json
+print(json.dumps({'type':'rotate-token','params':{'new_token':'$new_token'}}))
+")
 
-  # Step 5: verify every peer accepts the new token
-  info "==> verifying every peer accepts the new token (15s grace for daemon startup)"
+  info "==> POST /jobs (rotate-token) on $cp_url"
+  local resp
+  resp=$(curl -fsS --location-trusted --max-time 30 \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -d "$body" "$cp_url/jobs") \
+    || die "POST /jobs failed — daemon unreachable?"
+  local job_id
+  job_id=$(printf '%s' "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+  ok "job created: $job_id"
+
+  # Poll until terminal state. Don't reuse _poll_job (cmd_upgrade.sh)
+  # because it auths with the OLD token; once the rotation is done,
+  # subsequent polls would fail. We finish polling BEFORE the daemons
+  # recreate (job marks done before the 5s recreate delay) so the OLD
+  # token still works.
+  local deadline=$((SECONDS + 120))
+  while (( SECONDS < deadline )); do
+    local job
+    job=$(curl -fsS --max-time 10 \
+      -H "Authorization: Bearer $token" "$cp_url/jobs/$job_id" 2>/dev/null) \
+      || { sleep 2; continue; }
+    local state
+    state=$(printf '%s' "$job" | python3 -c "import json,sys; print(json.load(sys.stdin)['state'])" 2>/dev/null || echo unknown)
+    case "$state" in
+      done) info "  job $job_id: done"; break ;;
+      failed|cancelled)
+        local err_msg
+        err_msg=$(printf '%s' "$job" | python3 -c "import json,sys; print(json.load(sys.stdin).get('error') or '')" 2>/dev/null || echo "")
+        die "job $job_id $state: $err_msg"
+        ;;
+    esac
+    sleep 2
+  done
+
+  # Wait for daemons to recreate with the new token (~5s detached
+  # delay + container restart time).
+  info "==> waiting 15s for daemons to recreate with new token"
   sleep 15
-  failures=0
+
+  # Verify every peer accepts the new token.
+  info "==> verifying every peer accepts the new token"
+  local failures=0
   for ip in ${PEER_IPS//,/ }; do
     local code
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
@@ -162,15 +162,4 @@ EOF
   echo ""
   echo "  Save it somewhere safe. The old token will not work for"
   echo "  daemon RPCs or new joins."
-}
-
-# Resolve node-N for a given IP from PEER_IPS order. Mirrors role.sh's
-# detection without sourcing it (we only need it for path resolution).
-_rotate_node_name_for() {
-  local target_ip="$1" idx=1
-  for ip in ${PEER_IPS//,/ }; do
-    [[ "$ip" == "$target_ip" ]] && { echo "node-$idx"; return; }
-    idx=$((idx + 1))
-  done
-  die "_rotate_node_name_for: $target_ip not in PEER_IPS"
 }

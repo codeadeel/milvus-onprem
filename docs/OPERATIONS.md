@@ -55,14 +55,18 @@ Easy to keep daily backups via cron:
 
 ## Backup and restore
 
-We wrap the official **`milvus-backup`** CLI from Zilliz. The binary is
-auto-downloaded on first use into `${REPO_ROOT}/.local/bin/milvus-backup`.
+`create-backup` / `export-backup` / `restore-backup` wrap the official
+`milvus-backup` CLI from Zilliz. The binary is auto-downloaded on
+first use into `${REPO_ROOT}/.local/bin/milvus-backup`.
+
+> **Backup name format:** alphanumerics + underscores only.
+> `milvus-backup` rejects hyphens.
 
 ### Take a backup
 
 ```bash
-./milvus-onprem create-backup --name=daily-2026-04-26
-# stores in MinIO at milvus-bucket/backup/daily-2026-04-26/
+./milvus-onprem create-backup --name=daily_2026_04_26
+# stores in MinIO at milvus-bucket/backup/daily_2026_04_26/
 
 ./milvus-onprem create-backup --name=billing-only --collections=billing,invoices
 # only the named collections
@@ -78,8 +82,8 @@ auto-downloaded on first use into `${REPO_ROOT}/.local/bin/milvus-backup`.
 
 ```bash
 docker exec milvus-minio mc cp -r \
-  local/milvus-bucket/backup/daily-2026-04-26/ \
-  /data/exports/daily-2026-04-26/
+  local/milvus-bucket/backup/daily_2026_04_26/ \
+  /data/exports/daily_2026_04_26/
 ```
 
 (`local` is the MinIO alias `minio_mc` sets up; the path inside the
@@ -89,7 +93,7 @@ container maps to `${DATA_ROOT}/minio` on the host.)
 
 ```bash
 # from a previously-created backup still in our MinIO:
-./milvus-onprem restore-backup --skip-upload --name=daily-2026-04-26 --restore_index
+./milvus-onprem restore-backup --skip-upload --name=daily_2026_04_26 --restore_index
 
 # from a backup that was created elsewhere and lives in a filesystem dir:
 ./milvus-onprem restore-backup --from=/path/to/external_backup
@@ -110,12 +114,13 @@ A developer hands you 100 GB of `milvus-backup` data on a laptop.
 To get it into the cluster:
 
 ```bash
-# on the developer's machine (or any host with the data):
-scp -r ~/dev_export operator@node-1:~/
+# 1. Get the export directory onto any peer of the cluster, using
+#    whatever transport your environment supports — shared NFS,
+#    object copy, USB, scp from a jump host, etc. End state: the
+#    backup directory lives somewhere on a peer's local filesystem.
 
-# on node-1:
-cd ~/milvus-onprem
-./milvus-onprem restore-backup --from=~/dev_export
+# 2. From that peer, run:
+./milvus-onprem restore-backup --from=/path/to/dev_export
 ```
 
 ### Useful flags for restore
@@ -200,191 +205,113 @@ via `[[ -x "$MILVUS_BACKUP_BIN" ]]` and skips the GitHub download.
 A typical backup cron in HA:
 
 ```cron
-# every night at 3am, take a full milvus-backup snapshot.
+# every night at 3am: take a full milvus-backup snapshot.
 # distributed MinIO replicates it across nodes automatically.
-0 3 * * *  /home/operator/milvus-onprem/milvus-onprem create-backup \
-             --name=daily-$(date +\%F)
+0 3 * * *  /opt/milvus-onprem/milvus-onprem create-backup \
+             --name=daily_$(date +\%Y_\%m_\%d)
 
 # weekly off-site export to /backups (assume that's an NFS mount):
-0 4 * * 0  /home/operator/milvus-onprem/milvus-onprem export-backup \
-             --name=daily-$(date +\%F --date='yesterday') \
-             --to=/backups/milvus/weekly-$(date +\%F)
+0 4 * * 0  /opt/milvus-onprem/milvus-onprem export-backup \
+             --name=daily_$(date +\%Y_\%m_\%d --date='yesterday') \
+             --to=/backups/milvus/weekly_$(date +\%Y_\%m_\%d)
 ```
-
-The wrapper handles everything: uploads to our MinIO, renders
-`backup.toml` from cluster.env, runs `milvus-backup restore --restore_index`.
 
 ## Recovering from single-node loss
 
-With proper N-node quorum (3+, odd), losing one node is mostly
-**automatic**. etcd's Raft quorum absorbs it; MinIO's distributed mode
-degrades gracefully; nginx routes around the dead Milvus.
+With odd-N quorum (3, 5, 7, …), losing one node is automatic. etcd's
+Raft quorum absorbs it; MinIO degrades gracefully; nginx routes
+around the dead Milvus.
 
-The detail you need to know is whether your cluster is on 2.5 or 2.6:
-on 2.6 a single node loss is invisible to the SDK; on 2.5 in-flight
-reads briefly see `code=106 collection on recovering` until querycoord
-rebalances channels (~50s untuned, ~15-20s with our tightened
-templates). Full breakdown, retry-helper recipe, and tuning recipe
-live in [FAILOVER.md](FAILOVER.md).
+On 2.6 a single-node loss is invisible to the SDK. On 2.5 in-flight
+reads briefly see `code=106 collection on recovering` until
+querycoord rebalances channels (~15-20s with shipped tunings). See
+[FAILOVER.md](FAILOVER.md) for the retry helper.
 
-Quick recovery procedure:
+Recovery:
 
-1. **Don't panic.** Cluster keeps serving from `(N-1)` nodes.
-2. **Retry SDK calls** that hit `code=106` — see
-   [`retry_on_recovering`](../test/tutorial/_shared.py).
-3. **Bring the node back**: `./milvus-onprem up`. Containers have
+1. Cluster keeps serving from `(N-1)` nodes.
+2. Retry SDK calls hitting `code=106` (the `retry_on_recovering`
+   helper in `test/tutorial/_shared.py` does this).
+3. Bring the node back: `./milvus-onprem up`. Containers have
    `restart: always`, so `systemctl start docker` after a host reboot
    is often enough.
-4. **Verify** with `./milvus-onprem status` and `wait`.
-5. **Cross-peer consistency**:
-   `python3 test/tutorial/05_prove_replication.py`.
+4. Verify: `./milvus-onprem status` and `wait`.
+5. Cross-peer consistency: `python3 test/tutorial/05_prove_replication.py`.
 
-If the data dir on the recovered node is **lost** (disk replaced,
-node reimaged), the node needs to clear its old etcd state and rejoin
-fresh. The procedure is documented under
-["Replacing a permanently-lost node"](TROUBLESHOOTING.md#replacing-a-permanently-lost-node)
-in TROUBLESHOOTING.md.
+If the recovered node's data dir is **lost** (disk replaced, VM
+reimaged), follow [Replacing a permanently-lost node](TROUBLESHOOTING.md#replacing-a-permanently-lost-node).
 
 ## Scale-out (add a node to an existing cluster)
 
-The `milvus-onprem add-node` + `update-peers` + `join --existing`
-trio handles online scale-out without a teardown / restore cycle.
-What is automated and what is operator-coordinated:
+On the new VM, run `join` against any existing peer. The daemon
+handles everything:
 
-### What's automated
+```bash
+cd ~/milvus-onprem
+./milvus-onprem join <peer-ip>:19500 <CLUSTER_TOKEN>
+```
 
-- **etcd member-add.** `add-node` calls `etcdctl member add` against
-  the existing cluster from any healthy peer. etcd Raft handles online
-  member changes correctly — surviving peers learn via gossip; the new
-  node starts with `ETCD_INITIAL_CLUSTER_STATE=existing`.
-- **`cluster.env` and template propagation.** `add-node` updates the
-  orchestrator's `cluster.env` and re-renders. `update-peers` does the
-  same on every other existing peer. nginx is reloaded
-  (non-disruptive) so its upstream list picks up the new node. The
-  joiner gets the updated `cluster.env` via the existing `pair` HTTP
-  rendezvous and runs `join --existing`, which sets the right etcd
-  state and runs bootstrap.
-
-### What's operator-coordinated
-
-- **MinIO server-list change.** Distributed MinIO takes its server
-  list at startup and does not support online member addition to the
-  same pool. Going from N to N+1 nodes requires every existing MinIO
-  to restart with the new server-list argument. The system stays
-  available across the rolling restart only if you do them one at a
-  time and wait for healthchecks between each — and even then, until
-  the new node's MinIO is up with the same server list, the cluster
-  is in a degraded state. Plan a brief MinIO maintenance window.
-
-  The alternative is `mc admin pool add` for server-pool expansion,
-  which adds the new node as a *separate* erasure-coded pool. New
-  writes go to whichever pool has space; existing data stays where
-  it is. Different operational shape — usually not what users mean
-  by "add a node," but no MinIO downtime.
-
-### Procedure
+What happens behind the scenes:
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant Op as Operator
-  participant N1 as orchestrator
-  participant N2 as other peers
-  participant N4 as new VM
+  participant New as new VM
+  participant Lead as leader
+  participant Etcd as etcd
 
-  Op->>N1: add-node --new-ip=...
-  N1->>N1: etcdctl member add online (Raft accepts)
-  N1->>N1: cluster.env grows, PEER_IPS appends new-ip
-  N1->>N1: render and nginx reload
-  N1-->>Op: prints next-step instructions
-
-  Op->>N2: update-peers --peer-ips=...
-  N2->>N2: cluster.env, render, nginx reload
-
-  Note over Op,N4: MinIO rolling restart, manual, one peer at a time
-  Op->>N1: docker compose ... force-recreate minio
-  Op->>N2: docker compose ... force-recreate minio
-
-  Op->>N1: pair, token issued
-  N1-->>Op: token
-  Op->>N4: join orchestrator:19500 token --existing
-  N4->>N1: GET /cluster.env
-  N1-->>N4: cluster.env with N+1 peers
-  N4->>N4: bootstrap with ETCD_INITIAL_CLUSTER_STATE=existing
-  N4->>N1: etcd Raft handshake (member already registered)
-  N4-->>Op: bootstrap complete, new node green
+  Op->>New: ./milvus-onprem join <peer>:19500 <token>
+  New->>Lead: POST /join (auth: bearer)
+  Lead->>Etcd: allocate node-N name (etcd transaction)
+  Lead->>Etcd: write topology entry
+  Lead->>Etcd: etcdctl member add (online)
+  Lead-->>New: cluster.env with N+1 peers
+  New->>New: write cluster.env, render, bootstrap (state=existing)
+  Note over Lead: every existing peer's daemon watches topology<br/>auto-renders, reloads nginx, rolling-restarts MinIO
+  New-->>Op: joined as node-N
 ```
 
-In order, on the indicated nodes:
+The CLUSTER_TOKEN lives in `cluster.env` on every existing peer if
+you need to retrieve it.
 
-```bash
-# 1. On any healthy existing peer (the orchestrator):
-./milvus-onprem add-node --new-ip=10.0.0.13 [--new-name=node-4]
-# (or: ... --dry-run to preview)
-
-# 2. On every OTHER existing peer (not the orchestrator), with the
-#    new PEER_IPS list printed by step 1:
-./milvus-onprem update-peers --peer-ips=10.0.0.10,10.0.0.11,10.0.0.12,10.0.0.13
-
-# 3. (MinIO) coordinate a rolling restart of MinIO on every existing
-#    peer. On each, in sequence (wait for healthy between):
-docker compose -f rendered/<node-name>/docker-compose.yml \
-  up -d --force-recreate minio
-
-# 4. On the orchestrator: serve the updated cluster.env to the new node.
-./milvus-onprem pair
-
-# 5. On the NEW VM:
-./milvus-onprem join <orchestrator-ip>:19500 <token> --existing
-```
-
-### Validation status
-
-- ✅ etcd member-add path validated against a live 3-node cluster
-  (added a TEST-NET-1 192.0.2.x member, confirmed quorum held with
-  3-of-4, removed cleanly).
-- ✅ `add-node` end-to-end on the orchestrator side: cluster.env
-  edited, templates re-rendered, nginx reloaded, no impact to running
-  cluster.
-- ✅ `update-peers` and `join --existing` have help text, dry-run mode,
-  argument validation (refuses self-removal, refuses already-present
-  IPs, requires healthy etcd).
-- ⏳ End-to-end with a real 4th VM: not yet run (no spare VM today).
-  When a 4th VM is available, the procedure above is the validation
-  test — `add-node` on m1, `update-peers` on m2/m3, MinIO rolling
-  restart, `join --existing` on m4, then `smoke` and
-  `05_prove_replication.py` should pass with the new peer included.
+Existing peers stay serving throughout. The rolling MinIO recreate
+keeps `(N-1)` of `N` MinIOs healthy at any moment, so distributed-mode
+quorum holds.
 
 ## Upgrading
 
 ### Patch-level upgrades (e.g. v2.6.11 → v2.6.12)
 
-Safe and straightforward:
-
 ```bash
-# on each node:
-# 1. edit cluster.env, change MILVUS_IMAGE_TAG to the new patch version
-# 2. then:
-./milvus-onprem render
-./milvus-onprem up
+./milvus-onprem upgrade --milvus-version=v2.6.12
 ```
 
-`docker compose up` will detect the image tag changed, pull the new
-image, and recreate the Milvus container with it. Per-node, takes
-~30s. Run on one node at a time to keep the cluster serving throughout.
+The daemon's `version-upgrade` job pulls the new image on every
+peer, then rolling-restarts the milvus services peer-by-peer (leader
+first), waits healthy after each, and aborts on the first failure.
 
-### Major-minor upgrades (e.g. v2.6.x → v2.7.x)
+### Major-minor upgrades (e.g. v2.5.x → v2.6.x)
 
-Requires either:
-- Templates exist for the new major.minor (`templates/2.7/`) — drop
-  them in, edit `MILVUS_IMAGE_TAG`, render + up. Test in a non-prod
-  cluster first.
-- They don't yet — community contribution opportunity.
+Cross-major upgrades require a planned migration via backup/restore:
 
-For backwards-incompatible upgrades (Milvus has had several): plan a
-migration via backup/restore. Take a `create-backup`, deploy the new
-version on a new cluster, `restore-backup` there, cut over clients,
-decommission the old cluster.
+```bash
+./milvus-onprem create-backup --name=pre_upgrade
+./milvus-onprem export-backup --name=pre_upgrade --to=/safe/path/
+
+# on every node:
+./milvus-onprem teardown --full --force
+
+# on the bootstrap VM:
+./milvus-onprem init --mode=distributed --milvus-version=v2.6.x
+# on every other VM:
+./milvus-onprem join <bootstrap-ip>:19500 <CLUSTER_TOKEN>
+# back on any peer:
+./milvus-onprem restore-backup --from=/safe/path/pre_upgrade
+```
+
+Plan a maintenance window. This is a hard cutover, not a rolling
+upgrade.
 
 ## Logging
 
@@ -421,25 +348,22 @@ For deeper Milvus debugging, edit `templates/<version>/milvus.yaml.tpl`
 and set `log.level: debug`, then `render && up`. Be prepared for a lot
 of output.
 
-## What to do if everything's on fire
+## Multi-node failure / unrecoverable state
 
-If multiple nodes are unhealthy at once or you can't reason about the
-state:
+If multiple nodes are unhealthy at once:
 
-1. **Don't run failover-style commands.** With proper Raft, those
-   aren't needed; running them when the cluster could self-heal makes
-   it worse.
-2. **Take an etcd snapshot from any reachable node:**
-   `./milvus-onprem backup-etcd`. This is your insurance.
-3. **Check `./milvus-onprem status` on each node.** Identify which
-   components are unhealthy where.
-4. **Check container logs** on the unhealthy components.
-5. **If it's truly a meltdown,** the path is:
-   - Capture `cluster.env` and rendered configs.
+1. Don't run failover-style commands. Raft self-heals; manual failover
+   on a recoverable cluster makes it worse.
+2. Take an etcd snapshot from any reachable node:
+   `./milvus-onprem backup-etcd`.
+3. `./milvus-onprem status` on each node — identify which components
+   are unhealthy where.
+4. Check container logs on the unhealthy components.
+5. If it's truly unrecoverable:
+   - Capture `cluster.env` and rendered configs off-cluster.
    - `teardown --full --force` on every node.
-   - Redeploy from scratch.
-   - `restore-backup` from your latest `milvus-backup` snapshot.
+   - Redeploy from scratch (see [DEPLOYMENT.md](DEPLOYMENT.md)).
+   - `restore-backup` from your latest `create-backup` snapshot.
 
-This is the worst-case path and assumes you've been making
-`create-backup` snapshots regularly. If you haven't, *make daily ones
-the first thing you do tomorrow*.
+This recovery path requires that `create-backup` snapshots exist.
+Take daily ones via cron.

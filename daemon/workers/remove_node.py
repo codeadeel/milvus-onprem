@@ -231,12 +231,11 @@ async def run_remove_node(ctx: JobContext) -> None:
     ctx.log_writer("")
     ctx.log_writer(f"OK {target_name} ({target_ip}) removed from the cluster.")
     ctx.log_writer("")
-    ctx.log_writer("Operator follow-up — on the LEAVING VM, clean up its containers:")
-    ctx.log_writer(f"    ssh adeel@{target_ip}")
-    ctx.log_writer("    cd /home/adeel/milvus-onprem")
+    ctx.log_writer(f"Operator follow-up — on the leaving VM ({target_ip}), clean up its")
+    ctx.log_writer("containers and data:")
     ctx.log_writer("    ./milvus-onprem teardown --full --force")
     ctx.log_writer("")
-    ctx.log_writer("(daemon-to-daemon teardown of a leaving peer is a v1.2 feature)")
+    ctx.log_writer("(daemon-to-daemon teardown of a leaving peer is a future feature)")
 
 
 # ── helpers ──────────────────────────────────────────────────────────

@@ -98,11 +98,9 @@ etcd. So `templates/2.5/` deploys the components separately:
 - `indexnode` — index-build worker.
 
 Plus a Pulsar broker on PULSAR_HOST (singleton; SPOF for writes —
-see [docs/PULSAR_HA.md](PULSAR_HA.md) for the in-cluster HA design,
-not yet implemented). Net per-node container count: 9 on regular
-peers, 10 on PULSAR_HOST (counts include the control-plane daemon).
-Higher than 2.6's 4-per-node, but it's the topology 2.5 was designed
-for.
+see `templates/2.5/README.md` for the SPOF caveat and external-Pulsar
+escape hatch). Per-node container count: 9 on regular peers, 10 on
+PULSAR_HOST (including the control-plane daemon).
 
 ### etcd (consensus store)
 
@@ -235,26 +233,17 @@ when reachability is restored.
 
 This tool is intentionally narrow. It does NOT do:
 
-- **Cross-DC replication.** Milvus has no native multi-region story;
-  we don't try to fake one. If you need multi-DC, run two clusters
-  and replicate at the application layer.
-- **Workload orchestration of arbitrary services.** It's not a
-  Kubernetes alternative. It does one thing: deploy and manage Milvus.
-- **Image-pull from internet at runtime.** The CLI doesn't enforce
-  this, but the design assumes you've mirrored the Milvus / etcd /
-  MinIO / nginx images into your local registry.
-- **TLS between nodes.** All inter-node traffic is plain HTTP / gRPC.
-  Lives behind your network's perimeter. TLS termination at nginx is
-  possible but not yet templated.
-
-## Why bash + docker compose, not Go + a custom orchestrator?
-
-Bash + docker compose is honest about what we are: a deployment recipe,
-not a runtime. A Go binary with a custom controller would be a
-miniature Kubernetes — exactly the complexity we set out to avoid.
-
-The CLI is ~2000 lines of small, focused bash files. Anyone can read
-it, understand what it does, and contribute.
+- **Cross-DC replication.** Milvus has no native multi-region story.
+  For multi-DC, run two clusters and replicate at the application
+  layer.
+- **Workload orchestration of arbitrary services.** Not a Kubernetes
+  alternative. It does one thing: deploy and manage Milvus.
+- **Image-pull from the public internet at runtime.** The CLI
+  doesn't enforce this, but the design assumes images are mirrored
+  to a local registry for production deploys.
+- **TLS between nodes.** Inter-node traffic is plain HTTP / gRPC,
+  expected to live behind a network perimeter. TLS termination at
+  nginx is possible but not templated.
 
 ## Further reading
 

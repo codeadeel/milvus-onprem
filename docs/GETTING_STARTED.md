@@ -43,7 +43,7 @@ Two decisions before you start:
 
 | Option | Best for |
 |---|---|
-| **2.6.11** (recommended) | New deploys. Embedded Woodpecker WAL, no Pulsar, simpler topology — 4 containers per peer. |
+| **2.6.11** (recommended) | New deploys. Embedded Woodpecker WAL, no Pulsar, simpler topology — 5 containers per peer (etcd, MinIO, Milvus, nginx, control-plane daemon). |
 | **2.5.4** | Existing 2.5 data, library compat constraints. 9-10 containers per peer (per-component coords + Pulsar singleton). [SPOF caveat applies](../templates/2.5/README.md#spof-caveat-the-pulsar-singleton). |
 
 **2. Cluster size**
@@ -102,7 +102,7 @@ Output ends with the join command for peers:
 
 ```bash
 ./milvus-onprem status        # local + peer reachability
-./milvus-onprem ps            # 4 containers — milvus, milvus-etcd, milvus-minio, milvus-nginx, milvus-onprem-cp
+./milvus-onprem ps            # 5 containers — milvus, milvus-etcd, milvus-minio, milvus-nginx, milvus-onprem-cp
 ```
 
 The daemon log (`docker logs milvus-onprem-cp`) should show

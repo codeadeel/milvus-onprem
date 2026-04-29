@@ -54,7 +54,7 @@ Checks (each block fails fast; subsequent checks may still run):
     - At least 5 GB free under /data parent (or a chosen path)
     - Required cluster ports not already bound on this host
     - bash >= 4 (we use mapfile and other modern builtins)
-    - python3 + curl + ssh available
+    - python3 + curl available
     - User belongs to the docker group (or running as root)
 
   PEER (requires cluster.env from init/join; needs PEER_IPS):
@@ -161,7 +161,7 @@ _preflight_local() {
   fi
 
   # Required CLIs
-  for tool in python3 curl ssh; do
+  for tool in python3 curl; do
     if ! command -v "$tool" >/dev/null 2>&1; then
       _pf_fail "missing command: $tool"
       fails=$((fails + 1))
@@ -288,22 +288,39 @@ _preflight_peer() {
     info "  (single-node deploy — no remote peers to probe)"
   fi
 
-  # Time-skew check (warn only). Use SSH if available.
-  if (( checked_any )) && command -v ssh >/dev/null 2>&1; then
-    local now_ts skew_warned=0
+  # Time-skew check (warn only). Probes each peer's control-plane
+  # daemon at GET /peer/clock. Skipped silently when daemons aren't
+  # up yet (pre-cluster preflight) or when CLUSTER_TOKEN isn't set —
+  # those are legitimate states, not preflight failures.
+  if (( checked_any )) \
+     && [[ -n "${CLUSTER_TOKEN:-}" ]] \
+     && command -v curl >/dev/null 2>&1; then
+    local now_ts skew_warned=0 probed_any=0
     now_ts=$(date +%s)
     for ip in ${PEER_IPS//,/ }; do
       [[ "$ip" == "$local_ip" ]] && continue
-      local their_ts skew
-      their_ts=$(ssh -o ConnectTimeout=3 -o StrictHostKeyChecking=no \
-                     "adeel@$ip" 'date +%s' 2>/dev/null) || continue
+      local their_ts skew resp
+      resp=$(curl -fsS --max-time 3 \
+        -H "Authorization: Bearer $CLUSTER_TOKEN" \
+        "http://$ip:${CONTROL_PLANE_PORT:-19500}/peer/clock" 2>/dev/null) \
+        || continue
+      their_ts=$(printf '%s' "$resp" | python3 -c \
+        "import json,sys; print(int(json.load(sys.stdin)['ts']))" 2>/dev/null) \
+        || continue
+      probed_any=1
       skew=$((their_ts - now_ts))
       [[ ${skew#-} -gt 30 ]] && {
         _pf_warn "$ip clock skew: ${skew}s (etcd Raft is sensitive to >30s skew; install NTP/chrony)"
         skew_warned=1
       }
     done
-    (( skew_warned == 0 )) && _pf_ok "time skew across peers within 30s"
+    if (( probed_any )) && (( skew_warned == 0 )); then
+      _pf_ok "time skew across peers within 30s"
+    elif (( ! probed_any )); then
+      info "  (peer daemons not reachable yet — install NTP/chrony on every peer; etcd is skew-sensitive)"
+    fi
+  elif (( checked_any )); then
+    info "  (skew check skipped — no CLUSTER_TOKEN yet; install NTP/chrony on every peer)"
   fi
 
   return $fails
