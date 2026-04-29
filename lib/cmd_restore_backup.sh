@@ -65,13 +65,48 @@ cmd_restore_backup() {
   env_require
   role_detect
 
-  # Distributed mode: route via the daemon's /jobs (recursion-guarded).
-  # Restore needs the backup data physically present on the daemon-host
-  # at $from_path — that's the same host the bash command executes on
-  # in standalone mode, so for v1.1 we keep the same model: operator
-  # places the export tree on whichever node they run the command from.
+  # Distributed mode: the upload step (host filesystem → MinIO) MUST run
+  # on the operator's local peer because that's where $from_path lives.
+  # The daemon job runs on the leader peer, which may be a different VM
+  # whose /tmp does not have the export tree. So we split the flow:
+  #
+  #   1. Validate + canonicalise the host path on the operator's peer.
+  #   2. Run the host-side upload here (docker cp + mc mirror) — this
+  #      works because milvus-minio is part of the cluster MinIO pool
+  #      and a write through ANY peer's MinIO is visible to ALL peers.
+  #   3. Submit a `restore-backup --skip-upload --name=$name` daemon job
+  #      so the leader runs only the milvus-backup restore phase, which
+  #      reads the bucket data from MinIO and doesn't need any local
+  #      filesystem access to the original $from_path.
+  #
+  # Skipped on operator-supplied --skip-upload (data already in MinIO).
   if [[ "${MODE:-standalone}" == "distributed" \
         && "${MILVUS_ONPREM_INTERNAL:-}" != "1" ]]; then
+    if (( skip_upload == 0 )) && [[ -n "$from_path" ]]; then
+      [[ -d "$from_path" ]] || die "$from_path does not exist or isn't a directory"
+      from_path="$(cd "$from_path" && pwd)"
+      [[ -z "$name" ]] && name="$(basename "$from_path")"
+
+      info "==> uploading $from_path → MinIO at milvus-bucket/backup/$name/"
+      info "    (runs on the local peer; cluster MinIO replicates to other peers)"
+      local container_tmp="/tmp/onprem-import-${name}-$$"
+      docker exec milvus-minio mkdir -p "$container_tmp"
+      if ! docker cp "${from_path}/." "milvus-minio:${container_tmp}/"; then
+        docker exec milvus-minio rm -rf "$container_tmp" 2>/dev/null
+        die "docker cp from host into MinIO container failed"
+      fi
+      if ! minio_mc mirror --quiet "${container_tmp}/" "local/milvus-bucket/backup/${name}/" >/dev/null; then
+        docker exec milvus-minio rm -rf "$container_tmp" 2>/dev/null
+        die "mc mirror inside MinIO container failed"
+      fi
+      docker exec milvus-minio rm -rf "$container_tmp" 2>/dev/null
+      ok "upload complete"
+      # The daemon job no longer needs the host path; pass the bucket
+      # name and skip-upload so the leader's worker only runs the
+      # restore-from-MinIO phase.
+      from_path=""
+      skip_upload=1
+    fi
     _restore_backup_via_daemon \
       "$from_path" "$name" "$skip_upload" "$restore_index" \
       "$drop_existing" "$auto_load" "$rename_pairs" \
@@ -86,8 +121,16 @@ cmd_restore_backup() {
     [[ -n "$name" ]] || die "--name required when --skip-upload (the data is already in MinIO)"
   else
     [[ -n "$from_path" ]] || die "--from is required (or use --skip-upload --name)"
-    [[ -d "$from_path" ]] || die "$from_path does not exist or isn't a directory"
-    from_path="$(cd "$from_path" && pwd)"            # canonical absolute
+    # The path-existence check has already run on the host when
+    # delegating from distributed mode (above). Inside the daemon
+    # container (MILVUS_ONPREM_INTERNAL=1), the host path isn't
+    # visible to the local bash, so re-running the check here would
+    # spuriously fail. The docker-cp call below reads the path via
+    # dockerd from the host filesystem regardless.
+    if [[ "${MILVUS_ONPREM_INTERNAL:-}" != "1" ]]; then
+      [[ -d "$from_path" ]] || die "$from_path does not exist or isn't a directory"
+      from_path="$(cd "$from_path" && pwd)"            # canonical absolute
+    fi
     [[ -z "$name" ]] && name="$(basename "$from_path")"
 
     info "==> uploading $from_path → MinIO at milvus-bucket/backup/$name/"
