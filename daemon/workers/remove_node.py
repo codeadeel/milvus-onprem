@@ -83,17 +83,22 @@ async def run_remove_node(ctx: JobContext) -> None:
     # actionable message instead of running a remove that breaks the
     # cluster. 2.6 (Woodpecker) doesn't have this — every peer runs
     # streamingnode locally, so the check is gated on MQ_TYPE.
-    mq_type = _read_cluster_env_value("MQ_TYPE", "").lower()
-    pulsar_host = _read_cluster_env_value("PULSAR_HOST", "node-1")
-    if mq_type == "pulsar" and target_name == pulsar_host:
-        raise PermissionError(
-            f"refusing to remove {target_name}: it is the cluster's "
-            f"Pulsar host (PULSAR_HOST={pulsar_host}). Removing it "
-            f"would leave the surviving peers without a broker. "
-            f"Migrate Pulsar to another peer first (planned), or "
-            f"upgrade the cluster to Milvus 2.6 (Woodpecker, no "
-            f"singleton broker) and retry."
-        )
+    #
+    # MQ_TYPE isn't persisted in cluster.env (lib/env.sh derives it
+    # from MILVUS_IMAGE_TAG so an upgrade just changes the tag and the
+    # rest follows). Mirror that derivation here so the Python worker
+    # can detect 2.5 deploys without a separate field to keep in sync.
+    if _is_pulsar_deploy():
+        pulsar_host = _read_cluster_env_value("PULSAR_HOST", "node-1")
+        if target_name == pulsar_host:
+            raise PermissionError(
+                f"refusing to remove {target_name}: it is the cluster's "
+                f"Pulsar host (PULSAR_HOST={pulsar_host}). Removing it "
+                f"would leave the surviving peers without a broker. "
+                f"Migrate Pulsar to another peer first (planned), or "
+                f"upgrade the cluster to Milvus 2.6 (Woodpecker, no "
+                f"singleton broker) and retry."
+            )
 
     leader_info_raw = await etcd.get("/cluster/leader")
     if leader_info_raw:
@@ -410,6 +415,21 @@ def _minio_access() -> str:
 
 def _minio_secret() -> str:
     return _read_cluster_env_value("MINIO_SECRET_KEY", "")
+
+
+def _is_pulsar_deploy() -> bool:
+    """Mirror lib/env.sh:_env_apply_version_defaults — derive MQ_TYPE from
+    the cluster.env'd Milvus image tag. Operator override via explicit
+    `MQ_TYPE=...` in cluster.env wins; otherwise 2.5.x → pulsar,
+    2.6+ → woodpecker (no singleton broker)."""
+    explicit = _read_cluster_env_value("MQ_TYPE", "").strip().lower()
+    if explicit:
+        return explicit == "pulsar"
+    tag = _read_cluster_env_value("MILVUS_IMAGE_TAG", "").lstrip("v")
+    parts = tag.split(".")
+    if len(parts) >= 2 and parts[0] == "2" and parts[1] == "5":
+        return True
+    return False
 
 
 register_handler("remove-node", run_remove_node)
