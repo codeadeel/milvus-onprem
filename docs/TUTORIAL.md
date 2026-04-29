@@ -5,6 +5,10 @@ milvus-onprem v1.2 on a real 4-VM cluster, both Milvus 2.5 and 2.6.
 Each section is small and stands alone — you can read top-to-bottom
 or jump to the operation you need.
 
+> **First-time deploy?** Start with the shorter
+> **[GETTING_STARTED.md](GETTING_STARTED.md)** (~15 min). This tutorial
+> is the deeper walkthrough that exercises every feature.
+
 > **Audience:** an operator who has Docker installed on N Linux VMs
 > in the same private subnet and wants HA Milvus without Kubernetes.
 > No prior milvus-onprem knowledge assumed.

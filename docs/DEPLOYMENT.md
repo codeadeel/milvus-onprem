@@ -1,6 +1,12 @@
 # Deployment
 
-Step-by-step guide to deploying a fresh milvus-onprem cluster from scratch.
+Step-by-step deployment reference for milvus-onprem.
+
+> **First-time?** [GETTING_STARTED.md](GETTING_STARTED.md) is the
+> shorter quickstart with the recommended 3-node 2.6 path. This doc
+> is the comprehensive reference covering edge cases, port matrices,
+> firewall rules, and prerequisites in detail.
+
 Worked example: 3-node deploy. Adjust IPs and node count for your size.
 
 If you hit problems, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
