@@ -286,16 +286,54 @@ class TopologyHandlers:
             )
         log.info("render OK after PULSAR_HOST change")
 
-        # `up -d` (no --no-deps, no service filter) recreates whichever
-        # services have changed in the rendered compose. Pulsar appears
-        # on the new host's compose and disappears from the old host's;
-        # Milvus services on every peer get a new pulsar.address from
-        # the rendered milvus.yaml so docker compose detects the change
-        # and recreates them. Other unchanged services are left alone.
+        # Explicitly enumerate which services to recreate. Running an
+        # unfiltered `docker compose up -d` would try to recreate the
+        # `control-plane` (milvus-onprem-cp) container too — i.e. the
+        # daemon running this very code — and SIGKILL it mid-RPC, with
+        # the operator's CLI then stuck polling the dead daemon. The
+        # rotate-token worker hit the same problem and uses a sidecar
+        # to recreate itself; for PULSAR_HOST the daemon doesn't need
+        # to recreate at all (its compose entry doesn't depend on
+        # PULSAR_HOST), so we just leave it out of the service list.
+        #
+        # Services that DO need a recreate: the Pulsar singleton itself
+        # (appears on the new host, disappears from the old) and every
+        # Milvus component (they pick up the new pulsar.address from
+        # the regenerated milvus.yaml at startup). etcd / minio /
+        # nginx / control-plane are unaffected. Filter against
+        # `docker compose config --services` so we don't try to
+        # `up` a service that isn't in this peer's rendered compose
+        # (e.g. `pulsar` is only on the PULSAR_HOST peer).
         node_dir = f"{REPO_PATH}/rendered/{self._cfg.node_name}"
+        compose_arg = (
+            f"--project-name {shlex.quote(self._cfg.node_name)} "
+            f"-f {shlex.quote(node_dir)}/docker-compose.yml"
+        )
+        rc, out, err = await _run(
+            f"docker compose {compose_arg} config --services"
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"docker compose config --services failed (rc={rc}): "
+                f"{err.strip()[:300]}"
+            )
+        present = set(out.split())
+        wanted = {
+            "pulsar",
+            "mixcoord", "datanode", "querynode",
+            "indexnode", "streamingnode", "proxy",
+        }
+        to_recreate = sorted(present & wanted)
+        if not to_recreate:
+            log.info(
+                "no pulsar-affected services in this peer's compose; "
+                "nothing to recreate"
+            )
+            return
+
         cmd = (
-            f"docker compose --project-name {shlex.quote(self._cfg.node_name)} "
-            f"-f {shlex.quote(node_dir)}/docker-compose.yml up -d"
+            f"docker compose {compose_arg} up -d --force-recreate "
+            f"--no-deps {' '.join(to_recreate)}"
         )
         rc, out, err = await _run(cmd)
         if rc != 0:
@@ -303,7 +341,10 @@ class TopologyHandlers:
                 f"docker compose up after PULSAR_HOST change failed "
                 f"(rc={rc}): {err.strip()[:400]}"
             )
-        log.info("services recreated for PULSAR_HOST=%s", new_pulsar_host)
+        log.info(
+            "services recreated for PULSAR_HOST=%s: %s",
+            new_pulsar_host, ", ".join(to_recreate),
+        )
 
     async def _rolling_minio_recreate(
         self,
