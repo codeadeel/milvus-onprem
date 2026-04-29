@@ -17,6 +17,7 @@ cmd_restore_backup() {
   local from_path=""
   local name=""
   local rename_pairs=""
+  local collections_filter=""
   local skip_upload=0
   local restore_index=1
   local version_only=0
@@ -31,6 +32,14 @@ cmd_restore_backup() {
       --name)                    name="$2"; shift 2 ;;
       --rename=*)                rename_pairs="${1#*=}"; shift ;;
       --rename)                  rename_pairs="$2"; shift 2 ;;
+      # Pass-through to milvus-backup's `--filter`. Scopes which
+      # collections to restore from a backup that may contain many.
+      # Example: --collections=db1.coll1,db2.coll2  (or just coll1
+      # for the default db). Without this, milvus-backup tries to
+      # restore EVERY collection in the backup, failing if any of
+      # them already exist (QA finding F-A.2).
+      --collections=*)           collections_filter="${1#*=}"; shift ;;
+      --collections)             collections_filter="$2"; shift 2 ;;
       --milvus-backup-version=*) MILVUS_BACKUP_VERSION="${1#*=}"; export MILVUS_BACKUP_VERSION; shift ;;
       --milvus-backup-version)   MILVUS_BACKUP_VERSION="$2"; export MILVUS_BACKUP_VERSION; shift 2 ;;
       --skip-upload)             skip_upload=1; shift ;;
@@ -65,7 +74,8 @@ cmd_restore_backup() {
         && "${MILVUS_ONPREM_INTERNAL:-}" != "1" ]]; then
     _restore_backup_via_daemon \
       "$from_path" "$name" "$skip_upload" "$restore_index" \
-      "$drop_existing" "$auto_load" "$rename_pairs"
+      "$drop_existing" "$auto_load" "$rename_pairs" \
+      "$collections_filter"
     return $?
   fi
 
@@ -114,6 +124,7 @@ cmd_restore_backup() {
   local args=(restore -n "$name")
   (( restore_index )) && args+=(--rebuild_index)
   [[ -n "$rename_pairs" ]] && args+=(--rename "$rename_pairs")
+  [[ -n "$collections_filter" ]] && args+=(--filter "$collections_filter")
 
   info "==> restoring '$name' (this can take 30–60 min for ~100 GB)"
   backup_run "${args[@]}"
@@ -283,6 +294,7 @@ EOF
 _restore_backup_via_daemon() {
   local from_path="$1" name="$2" skip_upload="$3" restore_index="$4"
   local drop_existing="$5" auto_load="$6" rename_pairs="${7:-}"
+  local collections_filter="${8:-}"
   local cp_url="http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}"
   local token="${CLUSTER_TOKEN:-}"
   [[ -n "$token" ]] || die "CLUSTER_TOKEN missing in cluster.env"
@@ -291,9 +303,10 @@ _restore_backup_via_daemon() {
   body=$(python3 -c "
 import json
 p = {}
-if '''$from_path''':    p['from']   = '''$from_path'''
-if '''$name''':         p['name']   = '''$name'''
-if '''$rename_pairs''': p['rename'] = '''$rename_pairs'''
+if '''$from_path''':          p['from']         = '''$from_path'''
+if '''$name''':               p['name']         = '''$name'''
+if '''$rename_pairs''':       p['rename']       = '''$rename_pairs'''
+if '''$collections_filter''': p['collections']  = '''$collections_filter'''
 if int('''$skip_upload''' or '0'):  p['name'] = p.get('name')  # no-op flag carried in 'name' alone
 if int('''$drop_existing''' or '0'): p['drop_existing'] = True
 if int('''$auto_load''' or '0'):     p['load']           = True

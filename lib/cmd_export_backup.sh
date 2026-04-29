@@ -104,6 +104,19 @@ EOF
   docker exec milvus-minio rm -rf "${container_tmp}" 2>/dev/null
 
   ok "exported to ${to_path}/"
+  # Distributed-mode hint: in distributed mode the export job runs on
+  # the leader, so $to_path lives on the leader's filesystem — not on
+  # whichever peer the operator invoked the command from. QA finding
+  # F-A.1. Surface it loudly so operators don't go hunting for the
+  # file on the wrong host.
+  if [[ "${MODE:-standalone}" == "distributed" ]]; then
+    info ""
+    info "Note: in distributed mode this file lives on the LEADER's"
+    info "filesystem (not necessarily this host). To find the leader:"
+    info "    ./milvus-onprem status      # 'this node' line"
+    info "Or scp it back manually:"
+    info "    scp <leader>:${to_path} ./"
+  fi
   info ""
   info "to restore on any cluster:"
   info "    milvus-onprem restore-backup --from=${to_path}"

@@ -44,6 +44,8 @@ async def run_restore_backup(ctx: JobContext) -> None:
         args.append("--skip-upload")
     if (v := p.get("rename")):
         args.append(f"--rename={v}")
+    if (v := p.get("collections")):
+        args.append(f"--collections={v}")
     if p.get("no_restore_index"):
         args.append("--no-restore-index")
     if p.get("drop_existing"):

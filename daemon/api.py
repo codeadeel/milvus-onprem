@@ -20,7 +20,7 @@ import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from dataclasses import asdict
@@ -240,7 +240,24 @@ async def post_join(req: JoinRequest, request: Request) -> Any:
             )
         log.info("redirecting /join from %s to leader at %s",
                  req.ip, leader_info["ip"])
-        return RedirectResponse(url=redirect_to, status_code=307)
+        # Include a JSON body explaining the redirect — curl without
+        # `--location-trusted` silently swallows 307s with empty bodies
+        # (QA finding F4.2). Tools that don't auto-follow 307 will at
+        # least see this message in the response.
+        return JSONResponse(
+            status_code=307,
+            headers={"Location": redirect_to},
+            content={
+                "redirect_to": redirect_to,
+                "leader": leader_info["ip"],
+                "hint": (
+                    "this peer is a follower; POST /join must reach the "
+                    "leader. retry against the URL in `redirect_to`, or "
+                    "use `curl --location-trusted -X POST ...` (the bash "
+                    "CLI does this automatically)."
+                ),
+            },
+        )
 
     try:
         result = await handle_join(
@@ -318,9 +335,24 @@ async def post_job(req: CreateJobRequest, request: Request) -> Any:
             )
         try:
             info = json.loads(leader_info_raw)
-            return RedirectResponse(
-                url=f"http://{info['ip']}:{config.listen_port}/jobs",
+            redirect_to = (
+                f"http://{info['ip']}:{config.listen_port}/jobs"
+            )
+            return JSONResponse(
                 status_code=307,
+                headers={"Location": redirect_to},
+                content={
+                    "redirect_to": redirect_to,
+                    "leader": info["ip"],
+                    "hint": (
+                        "this peer is a follower; POST /jobs must reach "
+                        "the leader. retry against the URL in "
+                        "`redirect_to`, or use `curl --location-trusted "
+                        "-X POST ...` (the bash CLI does this "
+                        "automatically). Without -L curl swallows the "
+                        "redirect silently and your write is lost."
+                    ),
+                },
             )
         except (json.JSONDecodeError, KeyError) as e:
             raise HTTPException(

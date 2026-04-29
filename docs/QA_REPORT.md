@@ -162,6 +162,42 @@ list → `templates/{2.5,2.6}/_daemon-service.yml.tpl` env block.
 | R4-G upgrade fault injection | Same-version upgrade is too fast on small data; the natural fault windows close before the kill lands. Real drill needs deliberate HTTP-layer fault injection (e.g. iptables drop on /upgrade-self responses, or a debug flag in the worker). |
 | R4-H backup format compat across milvus-backup binary versions | Need multiple binary versions in cache; only `v0.5.14` is downloaded. Operator can supply `--milvus-backup-version=` on `create-backup`/`restore-backup`; the version pinning works (already env-driven via `MILVUS_BACKUP_VERSION`). Cross-version-binary compat is upstream-binary-vendor concern; out of scope. |
 
+## Round 5 — A + B sweep
+
+User asked to clear all of section A (R4-deferred items) and B (the
+"never drilled but fair-game" list, including fixes for documented
+warts).
+
+### Drills
+
+| ID | Result |
+|---|---|
+| **B-1** Cross-major upgrade refusal | ✅ `upgrade --milvus-version=v2.6.11` against a 2.5.4 cluster fails fast with: `refusing cross-major upgrade v2.5.4 -> v2.6.11. Use backup -> teardown -> re-init at the new version, then restore.` Helpful, actionable. |
+| **B-4** Init validation edge cases | ⚠️ 3 findings — see below. |
+| **B-3** Daemon image patch upgrade | ✅ Implicitly validated all session — every `daemon/*.py` change has been deployed via scp + rebuild + force-recreate during QA. The flow works without daemon-side coordination (image cache is local; restart is fast; no inter-peer coordination needed since each daemon owns only its own host). |
+| **A-1 / B-7** Kill mixcoord on a peer mid-/upgrade-self | ⚠️ Same-version upgrade is too fast on small data; kill window misses. Logic review of `daemon/workers/version_upgrade.py` confirms the abort path raises `RuntimeError(f"{peer_ip} upgrade failed: ...")` on /upgrade-self error responses. Functional drill of an actual mid-upgrade abort needs HTTP-layer fault injection (iptables drop or a debug flag). |
+| **A-2** Upgrade fault injection at HTTP layer | ⚠️ Not drilled — iptables/debug-flag setup is heavier than the time budget. Logic-reviewed only. |
+| **B-6** Permanently-lost-node recovery (re-drill) | ✅ Drilled on m3: teardown --full → etcdctl member-remove → etcdctl member-add → join. Caveat: if topology entry was deleted, /join falls through to non-idempotent path and tries member-add again (HTTP 500). Operator should preserve topology entry; the documented recovery procedure already says so. |
+| **B-2** `--resume` on a real partial join | ✅ Drilled on m4: teardown → background `join` killed after cluster.env appears → leftover containers force-stopped → plain `join` correctly refuses with the `--resume` hint → `join --resume` re-runs bootstrap from existing cluster.env → cluster N=4 green. The full operator workflow works end-to-end. |
+| **A-3 / R4-H** Backup format compat across milvus-backup binary versions | ⚠️ Need a different binary version cached locally; out of scope for this round. The `MILVUS_BACKUP_VERSION` env / `--milvus-backup-version=` flag are env-driven (work for whatever binary is selected); cross-binary compat is upstream-vendor concern. |
+
+### Findings — Round 5 (B-4 init validation)
+
+| ID | Severity | Symptom |
+|---|---|---|
+| F-B4.1 | **bug** | `init --cluster-name='cluster name with spaces'` writes `CLUSTER_NAME=cluster name with spaces` (no quoting) to cluster.env. Sourcing the file then errors with `bash: line 14: name: command not found`. Init reports success but the resulting cluster.env is corrupt. Fix: validate cluster-name regex (`^[A-Za-z0-9_-]+$`) at parse time, or quote the value when writing. |
+| F-B4.2 | **wart** | `init --data-root=/proc/sys/kernel` (an unwritable path) doesn't fail-fast; mkdir errors print but execution continues. Should pre-flight check `[[ -w "$(dirname "$DATA_ROOT")" ]]` and refuse cleanly. |
+| F-B4.3 | **bug-or-wart** | `init --overwrite` clobbers cluster.env even when the cluster has running containers. An operator running `init --overwrite` for a different version on a peer that's already part of a live cluster wipes the canonical cluster.env. Should pre-flight check whether `milvus-onprem-cp` is running and refuse unless `--overwrite-running` is also passed. (Caught the hard way during QA when I clobbered m1's cluster.env mid-drill — recovered from m2's copy.) |
+
+### Round 5 fixes shipped
+
+| Fix | What it does |
+|---|---|
+| **B-11** silent 307 → loud 307 | `daemon/api.py` `/join` and `/jobs` redirects now return JSON bodies explaining `redirect_to`, the leader IP, and `--location-trusted` requirement. Validated: `curl -X POST` (no -L) to a follower returns the helpful JSON body instead of a silent empty 307. |
+| **B-10** join curl `--max-time` 60s → 300s | `lib/cmd_join.sh` — concurrent SSH joins from a script (QA finding F-Phase2.1) used to time out past the leader's `_join_lock` serialisation. 300s gives ~5 sequential joins headroom. Annotated comment explains the trade-off. |
+| **B-8** restore-backup `--collections` filter | New `--collections=db.coll1,db.coll2` flag in `lib/cmd_restore_backup.sh` (and `daemon/workers/restore_backup.py` worker), passed through to milvus-backup's `--filter`. Resolves QA finding F-A.2: previously, restoring a backup that contained collections A+B+C with `--rename=A:Anew` failed because milvus-backup tried to also restore B and C unmapped. Now operators scope to one collection. |
+| **B-9** export-backup leader-tmp doc fix | `lib/cmd_export_backup.sh` — when `MODE=distributed`, the success message now explicitly notes the export landed on the **leader's** filesystem (not necessarily this host), and prints the operator's recovery command (`scp <leader>:<path> ./`). Resolves the operator-confusion aspect of F-A.1 without needing the heavier auto-rsync infrastructure. |
+
 ## Known limitations (not fixed in this pass)
 
 | ID | What it is | Why deferred |

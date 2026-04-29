@@ -80,7 +80,13 @@ cmd_join() {
   # the header to a peer is a no-op. Default `-L` would strip the
   # header on cross-host redirects (curl's anti-credential-leak rule),
   # leaving the leader to reject with 401 missing-bearer-token.
-  http_code="$(curl -sS --location-trusted --max-time 60 \
+  # 300s timeout (was 60s) — when multiple peers join concurrently the
+  # leader's _join_lock serialises them, and the joiner has to wait
+  # behind in-flight peers. With 60s, parallel joins from a script
+  # silently failed past the second peer (QA finding F-Phase2.1). 300s
+  # gives ~5 sequential joins headroom; if you're growing >5 peers in
+  # one shot, run them sequentially anyway.
+  http_code="$(curl -sS --location-trusted --max-time 300 \
     -o "$resp_file" -w "%{http_code}" \
     -X POST \
     -H "Authorization: Bearer $token" \
