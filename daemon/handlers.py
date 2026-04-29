@@ -92,7 +92,19 @@ class TopologyHandlers:
         # First: edit the local cluster.env's PEER_IPS to match etcd, and
         # re-render. Both reads and writes go through `./milvus-onprem`
         # so we reuse all the existing bash logic instead of re-implementing.
-        await self._sync_cluster_env_and_render()
+        # If render fails, the rendered/ tree is stale; downstream actions
+        # (nginx reload + rolling MinIO recreate) would propagate the old
+        # config across the cluster and leave it in a broken state. Abort
+        # this dispatch and rely on the next topology change to retry —
+        # the next /join's etcd PUT, or the operator running render again,
+        # will trigger a fresh handler that re-attempts.
+        if not await self._sync_cluster_env_and_render():
+            log.warning(
+                "render failed; skipping nginx reload + minio recreate "
+                "to avoid propagating stale config. Will retry on next "
+                "topology event."
+            )
+            return
 
         # Second: nginx reload. Cheap, non-disruptive (signal-based).
         await self._reload_nginx()
@@ -111,7 +123,7 @@ class TopologyHandlers:
 
     # ── primitive operations ─────────────────────────────────────────
 
-    async def _sync_cluster_env_and_render(self) -> None:
+    async def _sync_cluster_env_and_render(self) -> bool:
         """Rebuild cluster.env's PEER_IPS list from etcd, then render.
 
         Reads the current PEER_IPS from cluster.env (mounted read-only —
@@ -120,18 +132,16 @@ class TopologyHandlers:
         invoked via subprocess; it picks up the new PEER_IPS and
         regenerates rendered/<this-node>/*.
 
-        The `_LIVE_CLUSTER_ENV` host-side path is the same file that
-        the daemon mounts read-only. We make the edit using the host's
-        own filesystem permissions via `sudo` from a shell script
-        executed via docker — no, simpler: we open the host file
-        directly through /repo/cluster.env which IS mounted read-write
-        as part of the /repo bind mount.
+        Returns True on success (or trivially on empty topology), False
+        if render failed. Caller uses the return value to decide whether
+        downstream actions (nginx reload, MinIO recreate) are safe to
+        run — they would otherwise propagate stale config.
         """
         cluster_env_host = os.path.join(REPO_PATH, "cluster.env")
         topology_ips = self._current_peer_ips()
         if not topology_ips:
             log.info("render: topology empty, skipping")
-            return
+            return True
 
         new_peer_ips = ",".join(topology_ips)
         await asyncio.to_thread(
@@ -144,8 +154,9 @@ class TopologyHandlers:
         )
         if rc != 0:
             log.warning("render failed (rc=%d): %s", rc, err.strip()[:500])
-            return
+            return False
         log.info("render OK")
+        return True
 
     async def _reload_nginx(self) -> None:
         """Send a signal to milvus-nginx to reload its config.

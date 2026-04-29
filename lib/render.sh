@@ -30,11 +30,19 @@ render_all() {
      && [[ -z "${MILVUS_ONPREM_INTERNAL:-}" ]] \
      && docker ps --filter 'name=^milvus-etcd$' --format '{{.Names}}' 2>/dev/null \
         | grep -q .; then
-    local cluster_tag
+    # Best-effort probe of the canonical version anchor. The etcdctl
+    # call is wrapped in `|| true` so a transient etcd-side timeout —
+    # most commonly the brief raft-conf-change window right after a
+    # member-add, when this peer's daemon re-renders before the new
+    # member's etcd has come online — does NOT abort the render. An
+    # empty `cluster_tag` from a failed probe simply skips the check
+    # this round; the next render (post-handler) will re-probe a
+    # healthy etcd and catch any real mismatch.
+    local cluster_tag=""
     cluster_tag="$(docker exec milvus-etcd /usr/local/bin/etcdctl \
       --endpoints="http://127.0.0.1:${ETCD_CLIENT_PORT}" \
       get /cluster/milvus_version --print-value-only 2>/dev/null \
-      | head -1)"
+      | head -1 || true)"
     if [[ -n "$cluster_tag" && "$cluster_tag" != "$MILVUS_IMAGE_TAG" ]]; then
       die "MILVUS_IMAGE_TAG in cluster.env (\"$MILVUS_IMAGE_TAG\") differs from the cluster's canonical version (\"$cluster_tag\" in etcd /cluster/milvus_version). Manually editing one peer's version is unsupported and produces a multi-version cluster that fails at runtime. Use \`./milvus-onprem upgrade --milvus-version=$cluster_tag\` to roll the cluster forward, or restore cluster.env to match."
     fi
