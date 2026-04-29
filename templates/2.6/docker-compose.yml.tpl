@@ -71,31 +71,13 @@ ${MINIO_VOLUMES_BLOCK}
       timeout: 10s
       retries: 3
 
-  # --- Milvus: standalone-clustered with embedded Woodpecker WAL ----------
-  # Runs `milvus run standalone` — the all-in-one binary. With shared etcd
-  # and shared object storage, multiple instances form a clustered Milvus
-  # via etcd-based service discovery and leader election.
-  milvus:
-    image: ${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}
-    container_name: milvus
-    network_mode: host
-    restart: always
-    command: ["milvus", "run", "standalone"]
-    volumes:
-      - ${DATA_ROOT}/milvus:/var/lib/milvus
-      - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
-    depends_on:
-      - etcd
-      - minio
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${MILVUS_HEALTHZ_PORT}/healthz"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+${MILVUS_SERVICES_BLOCK}
 
-  # --- nginx: LB across all ${CLUSTER_SIZE} Milvus instances on :${NGINX_LB_PORT}
+  # --- nginx: LB across all ${CLUSTER_SIZE} Milvus proxies on :${NGINX_LB_PORT}
   # Layer 4 (TCP) load balancer with passive health checks. Clients connect
-  # to any node's :${NGINX_LB_PORT}; nginx routes to a healthy Milvus.
+  # to any node's :${NGINX_LB_PORT}; nginx routes to a healthy backend.
+  # Standalone mode: backend is each peer's `milvus`. Distributed mode:
+  # backend is each peer's `proxy` container. Same gRPC port either way.
   nginx:
     image: ${NGINX_IMAGE_REPO}:${NGINX_IMAGE_TAG}
     container_name: milvus-nginx
@@ -103,8 +85,6 @@ ${MINIO_VOLUMES_BLOCK}
     restart: always
     volumes:
       - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - milvus
     healthcheck:
       # Verify the LB port is bound. nginx:alpine's busybox `nc -z`
       # handles a connect-only probe without needing bash or curl.

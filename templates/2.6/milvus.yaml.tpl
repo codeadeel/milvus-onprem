@@ -67,5 +67,26 @@ common:
   security:
     authorizationEnabled: false
 
+# -----------------------------------------------------------------------------
+# Coordinator active-standby — required for multi-mixcoord HA in cluster
+# mode. Without it, when a second mixcoord starts and tries to register
+# its session at by-dev/meta/session/<coord>, the etcd CompareAndSwap
+# fails (key already held by the first mixcoord) and the session helper
+# panics. With it, the loser of the CAS race watches the leader's
+# session lease and promotes on TTL expiry. mixCoord is the 2.6
+# consolidated key; per-coord keys still apply for back-compat.
+# -----------------------------------------------------------------------------
+mixCoord:
+  enableActiveStandby: true
+
+rootCoord:
+  enableActiveStandby: true
+
+dataCoord:
+  enableActiveStandby: true
+
+queryCoord:
+  enableActiveStandby: true
+
 log:
   level: info

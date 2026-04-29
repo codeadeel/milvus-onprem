@@ -153,19 +153,23 @@ class LocalComponentWatchdog:
 
     async def _maybe_restart(self, name: str) -> None:
         """Restart `name` if mode allows and the loop-guard hasn't
-        tripped. Resets the unhealthy counter on success."""
-        # Once a container has tripped the loop guard, do NOT restart
-        # again — even if its 5-min sliding window of restart timestamps
-        # has aged out. Documented design intent (per the docstring on
-        # this class) is "leave alone for operator" once 3 restarts in
-        # 5min have happened. Prior behavior was a sliding-window rate-
-        # limit: after 5min of inactivity the oldest restart aged out,
-        # `len(history)` dropped below `restart_loop_max`, and the
-        # watchdog resumed restarts — which contradicts the documented
-        # promise and creates indefinite background load on a sticky-
-        # unhealthy container. The flag clears only when the container
-        # reaches `health=healthy` (see _tick: healthy → reset counter
-        # and discard the flag).
+        tripped. Resets the unhealthy counter on success.
+
+        Loop guard semantics: count cumulative restart attempts since
+        the container last reached `health=healthy`. After
+        `watchdog_restart_loop_max` (default 3) consecutive restarts
+        without the container going healthy, halt auto-restart and
+        leave the container alone for the operator. The flag clears
+        only when the container reaches `health=healthy` (see _tick:
+        healthy → reset counter and discard the flag).
+
+        A previous implementation used a sliding 5-minute window over
+        restart timestamps; for sticky-unhealthy containers that
+        cycled at intervals just shy of the window, the oldest restart
+        kept aging out before the next attempt, so `len(history)`
+        never reached the threshold and auto-restart kept running
+        forever. Cumulative-count guard is harder to fool.
+        """
         if name in self._loop_alerted:
             log.warning(
                 "watchdog: %s in restart loop — leaving alone for operator "
@@ -175,22 +179,18 @@ class LocalComponentWatchdog:
             return
 
         history = self._restart_history[name]
-        cutoff = time.time() - self._cfg.watchdog_restart_loop_window_s
-        while history and history[0] < cutoff:
-            history.popleft()
 
         if len(history) >= self._cfg.watchdog_restart_loop_max:
             _emit(
                 f"COMPONENT_RESTART_LOOP ts={_now()} container={name} "
-                f"restarts_in_5m={len(history)}"
+                f"restarts_total={len(history)}"
             )
             self._loop_alerted.add(name)
             log.warning(
-                "watchdog: %s in restart loop (%d restarts in %ds) — "
-                "halting auto-restart for this container",
+                "watchdog: %s in restart loop (%d cumulative restarts "
+                "without recovery) — halting auto-restart for this container",
                 name,
                 len(history),
-                self._cfg.watchdog_restart_loop_window_s,
             )
             return
 

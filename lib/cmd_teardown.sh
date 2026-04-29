@@ -71,6 +71,7 @@ EOF
   fi
   docker rm -f milvus milvus-nginx milvus-minio milvus-etcd milvus-pulsar \
     milvus-mixcoord milvus-proxy milvus-querynode milvus-datanode milvus-indexnode \
+    milvus-streamingnode milvus-onprem-cp \
     2>/dev/null || true
 
   info "wiping data dirs under $DATA_ROOT"

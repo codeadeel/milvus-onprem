@@ -79,6 +79,7 @@ _render_var_list() {
            MILVUS_PORT MILVUS_HEALTHZ_PORT NGINX_LB_PORT \
            MILVUS_ROOTCOORD_PORT MILVUS_QUERYNODE_PORT \
            MILVUS_DATANODE_PORT MILVUS_INDEXNODE_PORT \
+           MILVUS_STREAMINGNODE_PORT MILVUS_HEALTHCHECK_START_PERIOD_S \
            PULSAR_BROKER_PORT PULSAR_HTTP_PORT \
            ETCD_INITIAL_CLUSTER ETCD_INITIAL_CLUSTER_STATE \
            MINIO_VOLUMES MINIO_VOLUMES_BLOCK MINIO_SERVER_CMD \
@@ -86,7 +87,7 @@ _render_var_list() {
            MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML \
            PULSAR_HOST PULSAR_HOST_IP PULSAR_SERVICE_BLOCK \
            CLUSTER_TOKEN CONTROL_PLANE_PORT CONTROL_PLANE_IMAGE \
-           CONTROL_PLANE_SERVICE_BLOCK \
+           CONTROL_PLANE_SERVICE_BLOCK MILVUS_SERVICES_BLOCK \
            WATCHDOG_MODE WATCHDOG_INTERVAL_S \
            WATCHDOG_UNHEALTHY_THRESHOLD WATCHDOG_PEER_FAILURE_THRESHOLD \
            WATCHDOG_RESTART_LOOP_WINDOW_S WATCHDOG_RESTART_LOOP_MAX \
@@ -225,10 +226,28 @@ _render_compute_derived() {
     fi
   fi
 
+  # MILVUS_SERVICES_BLOCK — chooses standalone (single milvus container)
+  # vs cluster mode (per-component containers) based on MODE. 2.5 always
+  # ships cluster mode inline in its docker-compose.yml.tpl (it can't
+  # run multi-instance standalone HA at all), so this only matters for
+  # 2.6.
+  MILVUS_SERVICES_BLOCK=""
+  local milvus_fragment=""
+  if [[ "${MILVUS_VERSION:-}" == "2.6" ]]; then
+    if [[ "${MODE:-standalone}" == "distributed" ]]; then
+      milvus_fragment="$REPO_ROOT/templates/2.6/_milvus-cluster.yml.tpl"
+    else
+      milvus_fragment="$REPO_ROOT/templates/2.6/_milvus-standalone.yml.tpl"
+    fi
+    if [[ -f "$milvus_fragment" ]]; then
+      MILVUS_SERVICES_BLOCK="$(envsubst "$(_render_var_list)" < "$milvus_fragment")"
+    fi
+  fi
+
   export ETCD_INITIAL_CLUSTER ETCD_INITIAL_CLUSTER_STATE \
          MINIO_VOLUMES MINIO_VOLUMES_BLOCK MINIO_SERVER_CMD \
          NGINX_UPSTREAM_BLOCK \
          MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML \
          PULSAR_HOST_IP PULSAR_SERVICE_BLOCK \
-         CONTROL_PLANE_SERVICE_BLOCK
+         CONTROL_PLANE_SERVICE_BLOCK MILVUS_SERVICES_BLOCK
 }

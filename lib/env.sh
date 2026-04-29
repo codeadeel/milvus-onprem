@@ -108,6 +108,15 @@ _env_apply_defaults() {
   : "${MILVUS_QUERYNODE_PORT:=21123}"
   : "${MILVUS_DATANODE_PORT:=21124}"
   : "${MILVUS_INDEXNODE_PORT:=21121}"
+  # Milvus 2.6 streamingnode — handles the embedded Woodpecker WAL.
+  # Used as the healthcheck TCP probe target in 2.6's cluster mode.
+  : "${MILVUS_STREAMINGNODE_PORT:=22222}"
+  # Healthcheck start_period for the milvus services. Joining peers
+  # take a while to converge under shared etcd (rootcoord election +
+  # session.ttl + first MinIO read of WAL state). Without a generous
+  # start_period the watchdog auto-restarts the container before it
+  # finishes initialising. Set conservatively for distributed deploys.
+  : "${MILVUS_HEALTHCHECK_START_PERIOD_S:=300}"
   : "${NGINX_LB_PORT:=19537}"
   : "${PULSAR_BROKER_PORT:=6650}"
   : "${PULSAR_HTTP_PORT:=8080}"

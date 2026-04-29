@@ -122,7 +122,7 @@ ${PULSAR_SERVICE_BLOCK}
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 120s
+      start_period: ${MILVUS_HEALTHCHECK_START_PERIOD_S}s
 
   # --- Milvus 2.5 proxy: gRPC entry, what nginx routes to -----------------
   # Healthcheck note for the next 4 components: only mixcoord binds
@@ -150,7 +150,7 @@ ${PULSAR_SERVICE_BLOCK}
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 90s
+      start_period: ${MILVUS_HEALTHCHECK_START_PERIOD_S}s
 
   # --- Milvus 2.5 querynode: query / search worker ------------------------
   querynode:
@@ -169,7 +169,7 @@ ${PULSAR_SERVICE_BLOCK}
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 90s
+      start_period: ${MILVUS_HEALTHCHECK_START_PERIOD_S}s
 
   # --- Milvus 2.5 datanode: ingest worker ---------------------------------
   datanode:
@@ -188,7 +188,7 @@ ${PULSAR_SERVICE_BLOCK}
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 90s
+      start_period: ${MILVUS_HEALTHCHECK_START_PERIOD_S}s
 
   # --- Milvus 2.5 indexnode: index-build worker ---------------------------
   indexnode:
@@ -207,7 +207,7 @@ ${PULSAR_SERVICE_BLOCK}
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 90s
+      start_period: ${MILVUS_HEALTHCHECK_START_PERIOD_S}s
 
   # --- nginx: LB across all ${CLUSTER_SIZE} proxies on :${NGINX_LB_PORT} --
   nginx:

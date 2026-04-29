@@ -295,15 +295,22 @@ def _major_minor(tag: str) -> str | None:
 def _milvus_services() -> list[str]:
     """Service names in the rendered compose to recreate during upgrade.
 
-    2.6: a single 'milvus' service runs the standalone-clustered
-         binary on each peer.
-    2.5: per-component containers (mixcoord/proxy/querynode/
-         datanode/indexnode). Pulsar is a singleton not bumped here.
+    Cluster mode (2.5 always; 2.6 distributed):
+        per-component containers — mixcoord/proxy/querynode/datanode/
+        indexnode (+ streamingnode on 2.6 for woodpecker WAL). Pulsar
+        is a singleton not bumped here.
+    2.6 standalone:
+        a single `milvus` service running `milvus run standalone`.
     """
     tag = _read_kv("MILVUS_IMAGE_TAG")
+    mode = _read_kv("MODE") or "standalone"
     if tag.startswith("v2.5"):
         return ["mixcoord", "proxy", "querynode", "datanode", "indexnode"]
-    # 2.6 and any future major default to single milvus container.
+    if mode == "distributed":
+        return [
+            "mixcoord", "proxy", "querynode", "datanode",
+            "indexnode", "streamingnode",
+        ]
     return ["milvus"]
 
 
