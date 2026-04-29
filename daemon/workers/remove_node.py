@@ -316,12 +316,31 @@ async def _decommission_state(target_url_fragment: str) -> str:
             return "none"
 
     try:
-        pools = _json.loads(out) if out.strip() else []
+        parsed = _json.loads(out) if out.strip() else []
     except _json.JSONDecodeError:
         # mc may produce non-json prefix; try to find the array.
         return "missing"
 
+    # `mc admin decommission status --json` returns a list of pool dicts
+    # on success, but a single error object {"status":"error", ...} when
+    # mc can't reach the local MinIO (e.g. MinIO crash-looping because
+    # its server cmdline still references a now-decommissioned pool —
+    # which is the very state our caller is polling through). Treat any
+    # non-list response as a transient "missing" so the caller's poll
+    # loop retries instead of crashing with AttributeError on the
+    # error dict's keys.
+    if not isinstance(parsed, list):
+        log.warning(
+            "mc admin decommission status returned non-list "
+            "(probably an mc error): %s",
+            str(parsed)[:200],
+        )
+        return "missing"
+    pools = parsed
+
     for pool in pools:
+        if not isinstance(pool, dict):
+            continue
         cmdline = pool.get("cmdline", "")
         if target_url_fragment not in cmdline:
             continue
