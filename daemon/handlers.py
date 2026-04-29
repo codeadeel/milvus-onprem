@@ -188,7 +188,20 @@ class TopologyHandlers:
         Public (no underscore prefix) because the per-peer
         `/recreate-minio-self` route on api.py calls this directly when
         the leader-driven rolling sweep RPCs in.
+
+        Why we re-fetch topology and re-render before the recreate:
+        the leader's rolling sweep can RPC us before our own watcher
+        has applied the latest topology change (raft replication and
+        the watcher's HTTP stream are independent of the leader's RPC
+        path). If we recreated using the OLD rendered/, milvus-minio
+        would come up with stale MINIO_VOLUMES — fewer endpoints than
+        the cluster expects — and refuse to form quorum. Refreshing
+        from etcd directly here is a quorum-protected read that
+        blocks until the local etcd has the latest, sidestepping the
+        race.
         """
+        await self._refresh_topology_from_etcd()
+        await self._sync_cluster_env_and_render()
         node_dir = f"{REPO_PATH}/rendered/{self._cfg.node_name}"
         cmd = (
             f"docker compose --project-name {shlex.quote(self._cfg.node_name)} "
@@ -202,6 +215,33 @@ class TopologyHandlers:
             return
         log.info("minio recreated; waiting for healthy")
         await _wait_minio_healthy(timeout_s=self._cfg.rolling_minio_healthy_wait_s)
+
+    async def _refresh_topology_from_etcd(self) -> None:
+        """Force-refresh the in-memory topology mirror from etcd.
+
+        The watcher updates the mirror reactively, but the watcher's
+        HTTP stream and an inbound RPC to /recreate-minio-self can
+        race: a fast RPC after a peer-add may land here before the
+        local watcher has seen the corresponding watch event. Doing
+        an explicit `get_prefix` against etcd is a linearisable read
+        — it returns only after the local etcd has applied the latest
+        write — so the mirror is guaranteed current after this call.
+        """
+        from .topology import TOPOLOGY_PREFIX
+
+        raw = await self._etcd.get_prefix(TOPOLOGY_PREFIX)
+        new_peers: dict[str, dict[str, Any]] = {}
+        import json as _json
+        for k, v in raw.items():
+            name = k.removeprefix(TOPOLOGY_PREFIX)
+            try:
+                new_peers[name] = _json.loads(v)
+            except _json.JSONDecodeError:
+                log.warning("ignoring malformed topology entry %s", name)
+        # In-place replace; we share the same dict object as the
+        # watcher, but every read+write here happens on the asyncio
+        # event loop (no thread races).
+        self._topology.peers = new_peers
 
     async def _rolling_minio_recreate(
         self,
