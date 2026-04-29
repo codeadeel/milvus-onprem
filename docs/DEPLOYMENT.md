@@ -12,8 +12,6 @@ Worked example: 3-node deploy. Adjust IPs and node count for your size.
 If you hit problems, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 For day-2 ops, see [OPERATIONS.md](OPERATIONS.md).
 
----
-
 ## Prerequisites
 
 ### Nodes
@@ -78,8 +76,6 @@ state — etcd Raft, distributed MinIO, Milvus etcd-based service
 discovery — uses peers in `PEER_IPS` directly. No external service
 resolution is performed.
 
----
-
 ## Deployment overview
 
 ```mermaid
@@ -116,8 +112,6 @@ Five steps total:
 
 Estimated time: **~10–15 minutes** total for a 3-node deploy.
 
----
-
 ## Step 1 — Clone the repo on every node
 
 On **every node**:
@@ -129,8 +123,6 @@ git log --oneline -1
 ```
 
 Same commit on every node. Drift here will cause subtle bugs.
-
----
 
 ## Step 2 — Init + pair on the bootstrap node
 
@@ -162,8 +154,6 @@ What this does:
 ```
 
 See `./milvus-onprem init --help` for the full flag list.
-
----
 
 ## Step 3 — Pair on the bootstrap node
 
@@ -198,8 +188,6 @@ The pair server stays running until either:
 - 10 minutes of idle (auto-exits)
 - You Ctrl-C (manual abort; rerun `pair` to mint a new token)
 
----
-
 ## Step 4 — Join from every other node
 
 On **each other peer** (in our example: `node-2` and `node-3`):
@@ -221,8 +209,6 @@ For each peer, the join + bootstrap takes ~3–5 minutes. The bootstrap
 on the second-and-later peers may print warnings about etcd quorum —
 that's expected because the bootstrap node hasn't run its own
 bootstrap yet (next step).
-
----
 
 ## Step 5 — Bootstrap on the bootstrap node
 
@@ -255,8 +241,6 @@ You'll see something like:
 ==> bootstrap complete on node-1
 ```
 
----
-
 ## Step 6 — Verify
 
 From any node:
@@ -284,8 +268,6 @@ Should end with `SMOKE TEST PASSED`. The first `replica_number=2` load
 takes 1–3 minutes on a fresh cluster (cold cache); subsequent loads
 are sub-second.
 
----
-
 ## Step 7 (recommended) — Verify replication
 
 Run the pymilvus tutorial, which includes a per-peer replication proof:
@@ -300,8 +282,6 @@ peer directly (bypassing the LB) and prints the same hit from each
 node. If they all return identical `id` and `dist`, you've got real
 working redundancy.
 
----
-
 ## Common stumbles
 
 | Symptom | Cause | Fix |
@@ -313,8 +293,6 @@ working redundancy.
 | `smoke`: hangs at `load (replica_number=2)` for >5 min | Only one Milvus has registered with QueryCoord | Check `docker logs milvus` on each peer; usually a slow startup. |
 
 For the rest, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
-
----
 
 ## What "done" looks like
 

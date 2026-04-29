@@ -3,8 +3,6 @@
 Day-2 operational tasks. For first-time deploy see [DEPLOYMENT.md](DEPLOYMENT.md).
 For when things break, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
----
-
 ## Daily / regular operations
 
 ### Check cluster health
@@ -54,8 +52,6 @@ Easy to keep daily backups via cron:
 ```cron
 0 3 * * *  /home/operator/milvus-onprem/milvus-onprem backup-etcd --output=/backups/etcd-$(date +\%F).db
 ```
-
----
 
 ## Backup and restore
 
@@ -218,8 +214,6 @@ A typical backup cron in HA:
 The wrapper handles everything: uploads to our MinIO, renders
 `backup.toml` from cluster.env, runs `milvus-backup restore --restore_index`.
 
----
-
 ## Recovering from single-node loss
 
 With proper N-node quorum (3+, odd), losing one node is mostly
@@ -250,8 +244,6 @@ node reimaged), the node needs to clear its old etcd state and rejoin
 fresh. The procedure is documented under
 ["Replacing a permanently-lost node"](TROUBLESHOOTING.md#replacing-a-permanently-lost-node)
 in TROUBLESHOOTING.md.
-
----
 
 ## Scale-out (add a node to an existing cluster)
 
@@ -301,15 +293,15 @@ sequenceDiagram
   participant N4 as new VM
 
   Op->>N1: add-node --new-ip=...
-  N1->>N1: etcdctl member add online; Raft accepts
-  N1->>N1: cluster.env grows; PEER_IPS appends new-ip
+  N1->>N1: etcdctl member add online (Raft accepts)
+  N1->>N1: cluster.env grows, PEER_IPS appends new-ip
   N1->>N1: render and nginx reload
   N1-->>Op: prints next-step instructions
 
   Op->>N2: update-peers --peer-ips=...
   N2->>N2: cluster.env, render, nginx reload
 
-  Note over Op,N4: MinIO rolling restart, manual,<br/>one peer at a time
+  Note over Op,N4: MinIO rolling restart, manual, one peer at a time
   Op->>N1: docker compose ... force-recreate minio
   Op->>N2: docker compose ... force-recreate minio
 
@@ -319,8 +311,8 @@ sequenceDiagram
   N4->>N1: GET /cluster.env
   N1-->>N4: cluster.env with N+1 peers
   N4->>N4: bootstrap with ETCD_INITIAL_CLUSTER_STATE=existing
-  N4->>N1: etcd Raft handshake; member already registered
-  N4-->>Op: bootstrap complete; new node green
+  N4->>N1: etcd Raft handshake (member already registered)
+  N4-->>Op: bootstrap complete, new node green
 ```
 
 In order, on the indicated nodes:
@@ -363,8 +355,6 @@ docker compose -f rendered/<node-name>/docker-compose.yml \
   restart, `join --existing` on m4, then `smoke` and
   `05_prove_replication.py` should pass with the new peer included.
 
----
-
 ## Upgrading
 
 ### Patch-level upgrades (e.g. v2.6.11 → v2.6.12)
@@ -395,8 +385,6 @@ For backwards-incompatible upgrades (Milvus has had several): plan a
 migration via backup/restore. Take a `create-backup`, deploy the new
 version on a new cluster, `restore-backup` there, cut over clients,
 decommission the old cluster.
-
----
 
 ## Logging
 
@@ -432,8 +420,6 @@ the looping container and leaves it for the operator (3 restarts in
 For deeper Milvus debugging, edit `templates/<version>/milvus.yaml.tpl`
 and set `log.level: debug`, then `render && up`. Be prepared for a lot
 of output.
-
----
 
 ## What to do if everything's on fire
 

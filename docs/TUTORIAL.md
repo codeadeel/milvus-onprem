@@ -33,8 +33,6 @@ or jump to the operation you need.
 11. [Cheat sheet](#cheat-sheet)
 12. [What's next](#whats-next)
 
----
-
 ## 1. Concepts
 
 ### What this tool is
@@ -112,8 +110,6 @@ erasure-coded mode. Nginx layer-4-load-balances the gRPC entry port.
 - **`init --mode=distributed`** — N-VM HA. Boots the control-plane
   daemon. Use for everything beyond a single VM. **This tutorial
   uses distributed mode throughout.**
-
----
 
 ## 2. Phase A — bootstrap 2.6 N=3
 
@@ -256,8 +252,6 @@ python3 test/tutorial/05_prove_replication.py
 Expected output: all 3 peers return the **same top hit** with the
 same distance. That's the replication invariant.
 
----
-
 ## 3. Phase B — add a 4th node online
 
 The cluster's running, you want N=4 without downtime. m4
@@ -324,8 +318,6 @@ Total: ~90s for a 3→4 grow on a small dataset. The cluster keeps
 You'll see a warning: `CLUSTER_SIZE=4 is even — Raft tolerates this
 but capacity is worse than the next-lower odd size`. Expected; harmless.
 
----
-
 ## 4. Phase C — verify across all 4 peers
 
 ```bash
@@ -338,8 +330,6 @@ python3 test/tutorial/05_prove_replication.py
 
 Expected: all 4 peers return the same top hit. The new m4 is fully
 serving reads.
-
----
 
 ## 5. Phase D — backup pipeline
 
@@ -400,8 +390,6 @@ restore would fail with `collection already exist`). `--load` loads
 the restored collection immediately — without it, it's stored but
 not queryable until you load it.
 
----
-
 ## 6. Phase E — rolling Milvus version upgrade
 
 Bump within a major (e.g. 2.6.11 → 2.6.12). **Cross-major upgrades
@@ -438,8 +426,6 @@ serve throughout. Total time: ~90s/peer.
 ./milvus-onprem smoke         # confirm functional
 ```
 
----
-
 ## 7. Phase F — remove a node
 
 Permanent shrink (e.g. retiring m4 at `10.0.0.5`):
@@ -474,8 +460,6 @@ Empty cluster: ~30s. With ~1 GB of data: ~5min.
 After the job, m4's containers are still running its old data; you
 can `teardown --full --force` on m4 to reclaim. The cluster is now
 N=3 again.
-
----
 
 ## 8. Phase G — watchdog drills
 
@@ -570,8 +554,6 @@ Now the local watchdog logs `mode=monitor` at startup and only emits
 alerts — no auto-restart. Useful when you suspect a healthcheck is
 mis-tuned and want to inspect first.
 
----
-
 ## 9. Phase H — failover drills
 
 ### H.1 Stop a Milvus container — does the cluster keep serving?
@@ -653,8 +635,6 @@ losers panic and `restart: always` cycles them — see
 [docs/TROUBLESHOOTING.md § Milvus 2.5: milvus-mixcoord panics with
 CompareAndSwap](TROUBLESHOOTING.md#milvus-25-milvus-mixcoord-panics-with-panic-function-compareandswap-error--for-key-querycoord-multi-mixcoord-cycle).
 
----
-
 ## 10. Phase I — Milvus 2.5 path
 
 If you need 2.5 specifically, the deploy path is identical except
@@ -722,8 +702,6 @@ Smoke, tutorial, replication-proof, backup, upgrade, remove-node,
 watchdog drills — all work identically on 2.5. The remove-node
 flow is slightly slower (multiple milvus-* containers to stop per
 peer); upgrade is same speed.
-
----
 
 ## Cheat sheet
 

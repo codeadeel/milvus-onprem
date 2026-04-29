@@ -11,8 +11,6 @@ debugging order is:
 
 For day-2 operational tasks, see [OPERATIONS.md](OPERATIONS.md).
 
----
-
 ## Init / pair / join issues
 
 ### Milvus 2.5 panics with `CompareAndSwap error ... for key: rootcoord`
@@ -143,8 +141,6 @@ FORCE_NODE_INDEX=N ./milvus-onprem init ...
 
 where N is the 1-based position of this node's IP in PEER_IPS.
 
----
-
 ## Scale-out / add-node issues
 
 ### `CLUSTER_SIZE=N invalid: must be 1 (standalone) or odd ≥3` after add-node
@@ -187,8 +183,6 @@ role_validate_size() {
   esac
 }
 ```
-
----
 
 ## Bootstrap / lifecycle issues
 
@@ -327,8 +321,6 @@ fails. Fixed by cleaning up via the bind mount (`sudo rm -f
 ${DATA_ROOT}/etcd/snapshot.db`). If you're stuck on a pre-fix build,
 that same command clears the leftover.
 
----
-
 ## etcd issues
 
 ### `member list` times out
@@ -352,8 +344,6 @@ docker exec milvus-etcd etcdctl --endpoints=http://127.0.0.1:2379 \
   get --prefix "by-dev/meta/session/" --keys-only
 ```
 
----
-
 ## MinIO issues
 
 ### `mc: distributed mode requires N drives`
@@ -370,8 +360,6 @@ If you really need lower drive counts (e.g. for testing), use
 The distributed MinIO cluster hasn't finished forming yet. Wait a
 minute and retry. `bootstrap` includes a wait helper that handles
 this; if you're running mc commands manually, give it 60-120s.
-
----
 
 ## milvus-backup issues
 
@@ -447,8 +435,6 @@ milvus-backup v0.5.x uses YAML, not TOML. The CLI generates
 you're on an older checkout — pull the latest. The file is rendered
 at `~/milvus-onprem/.local/backup.yaml` per invocation.
 
----
-
 ## Tutorial / smoke issues
 
 ### `smoke-test.py` hangs at `load (replica_number=2)`
@@ -472,8 +458,6 @@ If it hangs >5 minutes:
 ```bash
 pip3 install --user --break-system-packages -r test/requirements.txt
 ```
-
----
 
 ## Networking / firewall issues
 
@@ -504,8 +488,6 @@ nc -zv <node-ip> 19537
 If reachable but Milvus errors: nginx has no healthy backend. Check
 each node's `docker logs --tail 50 milvus`.
 
----
-
 ## Cleanup / reset
 
 If the cluster is in a state you can't reason about, the nuclear option
@@ -525,8 +507,6 @@ Restore from those:
 # (pair / join / bootstrap as usual)
 ./milvus-onprem restore-backup --from=<your-backup-dir>
 ```
-
----
 
 ## Failover and recovery
 
@@ -552,7 +532,7 @@ sequenceDiagram
   Note over Repl: dead, data lost,<br/>or reimaged
 
   Op->>Survivor: status, etcdctl endpoint health
-  Survivor-->>Op: target unreachable; quorum OK
+  Survivor-->>Op: target unreachable, quorum OK
 
   Op->>Survivor: etcdctl member remove old-id
   Survivor->>Etcd: remove
@@ -569,9 +549,9 @@ sequenceDiagram
   Survivor-->>Repl: cluster.env
   Repl->>Repl: bootstrap with state=existing
   Repl->>Etcd: handshake matches the unstarted entry
-  Etcd-->>Repl: accepted; Raft snapshot
-  Repl-->>Op: bootstrap complete; cluster green
-  Note over Etcd: MinIO heal runs in<br/>background; data rebuilds<br/>from surviving shares
+  Etcd-->>Repl: accepted, Raft snapshot
+  Repl-->>Op: bootstrap complete, cluster green
+  Note over Etcd: MinIO heal runs in background, data rebuilds from surviving shares
 ```
 
 #### Step 1 — confirm what's dead and what isn't
@@ -738,8 +718,6 @@ recipe that drops the window to ~15-20s. Full background and the
 
 If you're on 2.6 and seeing this code, it's a different bug — capture
 `docker logs milvus` and `./milvus-onprem status` and open an issue.
-
----
 
 ## Reporting new issues
 

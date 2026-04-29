@@ -12,8 +12,6 @@ Linux VMs and no cluster orchestrator.
 > 23 findings and 25 fixes shipped. See [docs/QA_REPORT.md](docs/QA_REPORT.md)
 > for the full audit trail.
 
----
-
 ## Architecture
 
 Per peer, 4-5 containers (more on Milvus 2.5). Every peer is identical;
@@ -73,8 +71,6 @@ flowchart TB
 | **nginx** | Layer-4 TCP load balancer in front of every peer's Milvus. Clients connect to any peer's `:19537` and get routed to a healthy backend. |
 | **control-plane daemon** | One per peer, leader-elected via etcd lease. Owns `/join`, the jobs primitive (backup / restore / upgrade / remove-node), the watchdog (auto-restart unhealthy local containers + peer-down alerts), and topology fan-out. |
 
----
-
 ## 5-minute quickstart (3-node 2.6, distributed mode)
 
 ```bash
@@ -103,8 +99,6 @@ rolling MinIO recreate, and nginx reload automatically.
 
 For the full walkthrough with hardware-validated outputs:
 **[docs/TUTORIAL.md](docs/TUTORIAL.md)**.
-
----
 
 ## Feature matrix
 
@@ -162,8 +156,6 @@ For the full walkthrough with hardware-validated outputs:
 
 Legend: ✅ live-validated · 📖 logic-reviewed · ⚠️ works with caveats · ❌ not implemented · ➖ N/A
 
----
-
 ## Documentation index
 
 | Read this | When |
@@ -181,8 +173,6 @@ Legend: ✅ live-validated · 📖 logic-reviewed · ⚠️ works with caveats �
 | [daemon/README.md](daemon/README.md) | Per-file walkthrough of the Python daemon. |
 | [templates/2.5/README.md](templates/2.5/README.md) · [templates/2.6/README.md](templates/2.6/README.md) | Per-version topology notes. |
 | [test/tutorial/README.md](test/tutorial/README.md) | 10-step pymilvus walkthrough for app developers. |
-
----
 
 ## Supported environments
 
@@ -204,8 +194,6 @@ Legend: ✅ live-validated · 📖 logic-reviewed · ⚠️ works with caveats �
 **Not required:** Kubernetes · cloud-provider APIs · cloud DNS · a specific
 Linux distro · a specific arch (amd64 + arm64 both work).
 
----
-
 ## Cluster sizes
 
 | Size | Use | Tolerates |
@@ -219,8 +207,6 @@ Linux distro · a specific arch (amd64 + arm64 both work).
 Even sizes (2, 4, 6, 8) are accepted with a warning — they tolerate the
 same loss count as the next-lower odd size, so 4 ≈ 3 from a fault-tolerance
 angle. Useful as a transient state during scale-out.
-
----
 
 ## License
 

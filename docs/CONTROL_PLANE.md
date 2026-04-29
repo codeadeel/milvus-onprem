@@ -389,8 +389,6 @@ goes away) plus ~500 lines of Python.
   serving (3-of-4 etcd quorum, 3 MinIO pools still available,
   nginx on m2/m3/m4 routes around dead m1's Milvus).
 
----
-
 ## 12 — Scope: ALL user operations route through the daemon
 
 Per operator direction, the persistent control plane isn't just for
@@ -683,8 +681,6 @@ ones here.)
   `docs/OPERATIONS.md` (replaced by automatic pool-add)
 - Manual etcd member-add docs (replaced by auto on join)
 - Manual `update-peers` invocation docs (replaced by auto)
-
----
 
 **Next step after operator ratification of §9 + §16 open questions:**
 move to Stage 2 (daemon scaffold), one stage per commit.

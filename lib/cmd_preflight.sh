@@ -27,12 +27,17 @@ PREFLIGHT_DISK_MIN_GB=5
 cmd_preflight() {
   local scope="all"
   local quiet=0
+  local peers_override=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --local) scope="local"; shift ;;
-      --peer)  scope="peer"; shift ;;
-      --all)   scope="all"; shift ;;
-      --quiet) quiet=1; shift ;;
+      --local)    scope="local"; shift ;;
+      --peer)     scope="peer"; shift ;;
+      --all)      scope="all"; shift ;;
+      --quiet)    quiet=1; shift ;;
+      --peers=*)  peers_override="${1#*=}"; shift ;;
+      --peers)    peers_override="$2"; shift 2 ;;
+      --peer-ip=*) peers_override="${1#*=}"; shift ;;
+      --peer-ip)   peers_override="$2"; shift 2 ;;
       -h|--help)
         cat <<'EOF'
 Usage: milvus-onprem preflight [OPTIONS]
@@ -62,6 +67,15 @@ Checks (each block fails fast; subsequent checks may still run):
   --local: skip the peer phase (use before init).
   --peer:  skip the local phase.
   --quiet: only print failures.
+  --peers=IP[,IP...]  override the peer list (defaults to
+                      PEER_IPS from cluster.env). Useful when
+                      cluster.env doesn't exist yet — for example,
+                      before a `join`, run on the new VM:
+                          ./milvus-onprem preflight --peer \\
+                              --peers=10.0.0.10
+                      to confirm you can reach the bootstrap node.
+                      Single IP or comma-separated list both work.
+  --peer-ip=IP        Alias for --peers (single IP).
 
 Exit codes:
   0 — every check passed
@@ -82,18 +96,27 @@ EOF
   # only need it for port defaults (local) and PEER_IPS (peer).
   env_load 2>/dev/null || true
 
+  # If --peers / --peer-ip given, use that as the source of truth for
+  # the peer phase, regardless of cluster.env state. Lets operators
+  # run preflight from a fresh VM before they've joined.
+  if [[ -n "$peers_override" ]]; then
+    PEER_IPS="$peers_override"
+    LOCAL_IP="${LOCAL_IP:-__none__}"   # don't filter ourselves out
+    export PEER_IPS LOCAL_IP
+  fi
+
   local fails=0 warns=0
   if [[ "$scope" == "local" || "$scope" == "all" ]]; then
     _preflight_local; fails=$((fails + $?))
   fi
   if [[ "$scope" == "peer" || "$scope" == "all" ]]; then
-    if [[ -f "$CLUSTER_ENV" ]]; then
+    if [[ -n "$peers_override" || -f "$CLUSTER_ENV" ]]; then
       _preflight_peer; fails=$((fails + $?))
     elif [[ "$scope" == "peer" ]]; then
-      err "preflight --peer requires cluster.env (run after init)"
+      err "preflight --peer requires either cluster.env (run after init) or --peers=IP[,IP...]"
       fails=$((fails + 1))
     else
-      (( quiet )) || info "preflight peer: skipped (cluster.env not present yet)"
+      (( quiet )) || info "preflight peer: skipped (cluster.env not present yet, and no --peers given)"
     fi
   fi
 

@@ -8,8 +8,6 @@ You can override any variable either at init time (`--flag=value`) or
 by editing `cluster.env` directly and running `./milvus-onprem render
 && ./milvus-onprem up`.
 
----
-
 ## Topology
 
 | Variable | Required | Default | Notes |
@@ -20,8 +18,6 @@ by editing `cluster.env` directly and running `./milvus-onprem render
 Each VM figures out its node identity at runtime by matching `hostname -I`
 against `PEER_IPS`. If that fails (e.g. unusual NAT setups), set
 `FORCE_NODE_INDEX=N` in the environment to override.
-
----
 
 ## Object storage (MinIO)
 
@@ -36,8 +32,6 @@ against `PEER_IPS`. If that fails (e.g. unusual NAT setups), set
 redeploy. MinIO doesn't support live credential rotation in distributed
 mode.
 
----
-
 ## Message queue / WAL
 
 | Variable | Required | Default | Notes |
@@ -47,8 +41,6 @@ mode.
 For Milvus 2.5 support (planned via community PR), `MQ_TYPE` will
 default to `pulsar` and the templates in `templates/2.5/` will deploy
 a Pulsar singleton.
-
----
 
 ## Container image versions
 
@@ -92,15 +84,11 @@ The `milvus-backup` binary is a separate concern — see
 | `2.5.x` | Planned via community PR (`templates/2.5/` with Pulsar singleton) |
 | `1.x` and earlier | Not supported, won't be |
 
----
-
 ## Storage
 
 | Variable | Default | Notes |
 |---|---|---|
 | `DATA_ROOT` | `/data` | Root for all on-disk state. Three subdirs are created: `${DATA_ROOT}/etcd`, `${DATA_ROOT}/minio`, `${DATA_ROOT}/milvus`. |
-
----
 
 ## Ports
 
@@ -127,8 +115,6 @@ All ports are settable at init time:
 
 Or edit cluster.env directly. After any port change, every peer needs
 `render && up` to pick it up.
-
----
 
 ## Watchdog
 
@@ -174,8 +160,6 @@ PEER_DOWN_ALERT        ts=<unix> node=<name> ip=<ip> consecutive_failures=N
 PEER_UP_ALERT          ts=<unix> node=<name> ip=<ip> was_down_for_s=N
 ```
 
----
-
 ## Pairing
 
 | Variable | Default | Notes |
@@ -185,8 +169,6 @@ PEER_UP_ALERT          ts=<unix> node=<name> ip=<ip> was_down_for_s=N
 The pair server uses a Bearer-token-authenticated HTTP server on this
 port to distribute `cluster.env` to peers. Token is auto-generated per
 session.
-
----
 
 ## Inspecting the live config
 
@@ -199,8 +181,6 @@ cat rendered/$(./milvus-onprem status 2>&1 | awk '/this node:/{print $3; exit}')
 ```
 
 Or just `cat cluster.env` — it's intentionally small.
-
----
 
 ## Editing cluster.env after deploy
 
@@ -221,8 +201,6 @@ Some changes need extra steps:
 | `MILVUS_IMAGE_TAG` (same major.minor patch) | Just `render && up`; safe. |
 | `PEER_IPS` | Tear down + redeploy. Re-numbering existing nodes mid-life is unsupported. |
 | `MILVUS_ONPREM_WATCHDOG_*` | Edit `rendered/<node>/docker-compose.yml` `control-plane` service env, then `docker compose up -d --force-recreate --no-deps control-plane` on each peer. |
-
----
 
 ## What's NOT in cluster.env
 
