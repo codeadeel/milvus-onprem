@@ -232,6 +232,38 @@ All six fixes drilled live on the 2.5 N=4 cluster:
 - F-Phase1.D: `maintenance --all --dry-run` lists actions; `--prune-images --confirm` cleared 672 MB
 - F-R4-B.1: `rotate-token --help` works (full rotation drill deferred to avoid disrupting live cluster mid-QA)
 
+## Round 9 — promote 📖 logic-reviewed items to ✅ live-drilled
+
+User asked to clear every code path that was only logic-reviewed.
+Drilled the highest-value untested ones on the live 2.6 N=4 cluster.
+
+### What was drilled
+
+| Feature | Before R9 | After R9 |
+|---|---|---|
+| `urls` / `version` / `wait` / `jobs types` / `ps` | 📖 | ✅ |
+| 2.6 concurrent SDK (8 threads, 4R + 4W, 240 ops) | ⚠️ | ✅ — 4 read-errors during initial channel-warm-up window (~6s); 0 write errors; final count exact |
+| 2.6 watchdog `COMPONENT_RESTART_LOOP` halt | ⚠️ | ✅ — 3 restarts + 1 LOOP + halt with WARN ticks only |
+| 2.6 F5.2 stuck-running sweep (kill leader mid-job) | ⚠️ | ✅ — `owner died (heartbeat age=68s; timeout=60s)` after ~77s |
+| `restore-backup --no-restore-index` | 📖 | ✅ (with other-collections-in-backup limitation surfaced) |
+| `restore-backup --collections=` filter (B-8) | 📖 | ⚠️ **bug surfaced** — see F-R9.1 below |
+| `maintenance --prune-etcd-jobs --confirm` (live, hits /admin/sweep) | 📖 | ✅ |
+| `maintenance --prune-logs --confirm` (live truncate) | 📖 | ✅ |
+| `rotate-token --force` (live atomic across-peer) | 📖 | ✅ — 19s end-to-end on N=4; all 4 peers' cluster.env updated; daemons accept new + reject old |
+| Same-major rolling upgrade on 2.6 (v2.6.11 → v2.6.11) | 📖 | ✅ — 48s for N=4; cluster-version anchor refreshed automatically |
+
+### New finding — Round 9
+
+| ID | Severity | Symptom |
+|---|---|---|
+| **F-R9.1** | **wart** (upstream binary) | `restore-backup --collections=X --rename=X:Y` doesn't actually filter to X. milvus-backup v0.5.14 applies `--rename` mapping FIRST, then `--filter` SECOND on the renamed names. Result: filter on source name (X) matches zero of the renamed collections (which are now Y), restore "completes" with 0 collections processed. Drilled with `--collections=default.qa26_concurrent --rename=default.qa26_concurrent:default.qa26_filt3`: log shows `collections task after mapping: [qa26_filt3,...]` then `collections task after filtering: []`. **Workarounds**: (a) use `--rename` alone — it implies filter for the renamed collections only when paired with `--drop-existing`, or (b) use milvus-backup's `--suffix` flag to apply the same suffix to ALL collections (skips conflict checks via fresh names). Pure --collections without --rename works correctly. The bash CLI plumbing of `--collections` is fine; the behavior is constrained by milvus-backup itself. |
+
+### Round 9 fixes / docs
+
+No new fixes shipped — F-R9.1 is upstream behavior. Consider documenting
+in the `restore-backup --help` text that `--collections` and `--rename`
+together don't compose intuitively in the v0.5.14 binary.
+
 ## Known limitations (not fixed in this pass)
 
 | ID | What it is | Why deferred |
