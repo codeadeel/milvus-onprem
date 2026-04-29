@@ -251,6 +251,60 @@ class TopologyHandlers:
         log.info("minio recreated; waiting for healthy")
         await _wait_minio_healthy(timeout_s=self._cfg.rolling_minio_healthy_wait_s)
 
+    async def apply_pulsar_host_change(self, new_pulsar_host: str) -> None:
+        """Update PULSAR_HOST in this peer's cluster.env, re-render, and
+        recreate the milvus + pulsar services so they pick up the new
+        broker address.
+
+        Called by the leader's `migrate-pulsar` worker via the
+        `/admin/sync-pulsar-host` endpoint, peer-by-peer:
+          - new host first: brings Pulsar up locally
+          - other peers next: their Milvus reconnects to the new
+            broker (in-flight Pulsar messages on the old host are
+            lost — caller documents the maintenance-window
+            requirement)
+          - old host last: removes its now-orphan Pulsar container
+            (the render no longer emits a Pulsar service block when
+            this peer isn't the host)
+
+        Idempotent: if PULSAR_HOST already equals new_pulsar_host the
+        cluster.env edit is a no-op, but we still re-render + recreate
+        so a partially-applied previous run can finish converging.
+        """
+        cluster_env_host = os.path.join(REPO_PATH, "cluster.env")
+        await asyncio.to_thread(
+            _upsert_kv, cluster_env_host, "PULSAR_HOST", new_pulsar_host
+        )
+        log.info("cluster.env PULSAR_HOST=%s", new_pulsar_host)
+
+        rc, out, err = await _run(
+            f"cd {shlex.quote(REPO_PATH)} && ./milvus-onprem render"
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"render failed (rc={rc}): {err.strip()[:300]}"
+            )
+        log.info("render OK after PULSAR_HOST change")
+
+        # `up -d` (no --no-deps, no service filter) recreates whichever
+        # services have changed in the rendered compose. Pulsar appears
+        # on the new host's compose and disappears from the old host's;
+        # Milvus services on every peer get a new pulsar.address from
+        # the rendered milvus.yaml so docker compose detects the change
+        # and recreates them. Other unchanged services are left alone.
+        node_dir = f"{REPO_PATH}/rendered/{self._cfg.node_name}"
+        cmd = (
+            f"docker compose --project-name {shlex.quote(self._cfg.node_name)} "
+            f"-f {shlex.quote(node_dir)}/docker-compose.yml up -d"
+        )
+        rc, out, err = await _run(cmd)
+        if rc != 0:
+            raise RuntimeError(
+                f"docker compose up after PULSAR_HOST change failed "
+                f"(rc={rc}): {err.strip()[:400]}"
+            )
+        log.info("services recreated for PULSAR_HOST=%s", new_pulsar_host)
+
     async def _rolling_minio_recreate(
         self,
         kind: str,

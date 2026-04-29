@@ -55,6 +55,8 @@ Usage: milvus-onprem <command> [options]
 
   remove-node      Gracefully remove a peer (distributed mode only).
   rotate-token     Rotate CLUSTER_TOKEN atomically across every peer.
+  migrate-pulsar   Move the 2.5 Pulsar singleton to a different peer
+                   (prerequisite for removing the current PULSAR_HOST).
 
   backup-etcd      Snapshot etcd to a .db file.
   create-backup    milvus-backup snapshot of live data (stored in MinIO).
@@ -114,6 +116,7 @@ main() {
     watchdog)        cmd_watchdog        "$@" ;;
     maintenance)     cmd_maintenance     "$@" ;;
     rotate-token)    cmd_rotate_token    "$@" ;;
+    migrate-pulsar)  cmd_migrate_pulsar  "$@" ;;
     preflight)       cmd_preflight       "$@" ;;
     -h|--help|help)  usage ;;
     *)               err "unknown command: $cmd"; usage; exit 1 ;;

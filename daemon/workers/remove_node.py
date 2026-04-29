@@ -95,9 +95,10 @@ async def run_remove_node(ctx: JobContext) -> None:
                 f"refusing to remove {target_name}: it is the cluster's "
                 f"Pulsar host (PULSAR_HOST={pulsar_host}). Removing it "
                 f"would leave the surviving peers without a broker. "
-                f"Migrate Pulsar to another peer first (planned), or "
-                f"upgrade the cluster to Milvus 2.6 (Woodpecker, no "
-                f"singleton broker) and retry."
+                f"Migrate Pulsar to another peer first:\n"
+                f"  ./milvus-onprem migrate-pulsar --to=<other-peer-name>\n"
+                f"then retry remove-node. Or upgrade to Milvus 2.6 "
+                f"(Woodpecker — per-peer streamingnode, no singleton)."
             )
 
     leader_info_raw = await etcd.get("/cluster/leader")

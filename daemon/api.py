@@ -514,6 +514,39 @@ async def post_admin_step_down(request: Request) -> dict[str, Any]:
     return {"stepped_down": bool(stepped)}
 
 
+class SyncPulsarHostRequest(BaseModel):
+    """Body for `POST /admin/sync-pulsar-host`. The leader broadcasts
+    the new PULSAR_HOST to every peer during a `migrate-pulsar` job."""
+
+    pulsar_host: str
+
+
+@router.post(
+    "/admin/sync-pulsar-host",
+    dependencies=[Depends(require_token)],
+    tags=["internal"],
+)
+async def post_admin_sync_pulsar_host(
+    request: Request, body: SyncPulsarHostRequest
+) -> dict[str, Any]:
+    """Apply a new PULSAR_HOST on this peer: write cluster.env, re-render,
+    and recreate the Milvus + Pulsar services so they pick up the new
+    broker address. Called by the leader's `migrate-pulsar` worker
+    against every peer in turn (new host first to bring Pulsar up,
+    other peers second to point Milvus at it, old host last to drop
+    its now-orphan Pulsar container)."""
+    handlers = request.app.state.handlers
+    try:
+        await handlers.apply_pulsar_host_change(body.pulsar_host)
+        return {"applied": True}
+    except Exception as e:
+        log.exception("sync-pulsar-host failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"{type(e).__name__}: {e}",
+        )
+
+
 @router.post(
     "/recreate-minio-self",
     dependencies=[Depends(require_token)],
