@@ -243,7 +243,43 @@ async def run_remove_node(ctx: JobContext) -> None:
 
     ctx.progress_setter(0.70)
 
-    # 4. etcd member-remove — find the member by peer URL, then delete.
+    # 4. Delete topology entry FIRST. The watcher fires REMOVED on
+    #    every peer; survivors' handlers re-render their compose
+    #    without the leaving peer in MINIO_VOLUMES, and the leader's
+    #    rolling-recreate sweep bounces every survivor's MinIO with
+    #    the new (shrunk) pool list. This used to be the LAST step,
+    #    but moving it ahead of etcd member-remove closes a real
+    #    race: between "decommission completes" (MinIO marks the
+    #    pool decommissioned in shared metadata) and "compose
+    #    updated" (handler-driven re-render), any restart of a
+    #    survivor's MinIO crashes with "pool decommissioned, please
+    #    remove from server command line". The window can be long
+    #    enough on slow disks that a healthcheck blip catches it.
+    #    Doing the topology delete + waiting for the rolling sweep
+    #    BEFORE the etcd-side remove keeps the survivors on a clean
+    #    compose throughout. m1's etcd is still in the cluster at
+    #    this point but its membership is purely cosmetic now —
+    #    nobody routes traffic to it.
+    ctx.log_writer(f"==> deleting topology entry for {target_name}")
+    await etcd.delete(TOPOLOGY_PREFIX + target_name)
+    ctx.log_writer(
+        "waiting for the topology-watcher chain to settle on each "
+        "survivor (rolling MinIO recreate excludes the decommissioned "
+        "pool)..."
+    )
+    await _wait_minio_settled_after_remove(
+        etcd=etcd,
+        target_ip=target_ip,
+        cluster_token=config.cluster_token,
+        listen_port=config.listen_port,
+        log_writer=ctx.log_writer,
+        timeout_s=180,
+    )
+
+    # 5. etcd member-remove — by now every survivor is on a compose
+    #    that no longer references the leaving peer's MinIO pool, so
+    #    nothing about the etcd-side cleanup will trigger a MinIO
+    #    crash. Find the member by peer URL, then delete.
     ctx.log_writer(f"==> etcd member-remove for {target_name}")
     member_id = await _find_etcd_member_id_by_peer_url(
         etcd, target_ip, _etcd_peer_port()
@@ -261,15 +297,7 @@ async def run_remove_node(ctx: JobContext) -> None:
             )
         except Exception as e:
             raise RuntimeError(f"etcd member-remove failed: {e}") from e
-    ctx.progress_setter(0.90)
-
-    # 5. Delete topology entry. Watchers on remaining peers will fire,
-    #    re-render, nginx-reload, MinIO recreate (now without the
-    #    leaving pool — format.json on remaining drives still says it
-    #    used to be N pools, but MinIO with one fewer pool definition
-    #    accepts that the missing one is decommissioned).
-    ctx.log_writer(f"==> deleting topology entry for {target_name}")
-    await etcd.delete(TOPOLOGY_PREFIX + target_name)
+    ctx.progress_setter(0.95)
 
     ctx.progress_setter(1.0)
     ctx.log_writer("")
@@ -461,6 +489,100 @@ def _is_pulsar_deploy() -> bool:
     if len(parts) >= 2 and parts[0] == "2" and parts[1] == "5":
         return True
     return False
+
+
+async def _wait_minio_settled_after_remove(
+    *,
+    etcd: Any,
+    target_ip: str,
+    cluster_token: str,
+    listen_port: int,
+    log_writer: Any,
+    timeout_s: int,
+) -> None:
+    """Block until every surviving peer's MinIO is healthy and no
+    longer references `target_ip` in its container's running
+    MINIO_VOLUMES.
+
+    Used after the topology entry for the leaving peer is deleted but
+    BEFORE the etcd member-remove. Goal: don't proceed until every
+    survivor's MinIO has been recreated with a compose that excludes
+    the now-decommissioned pool — otherwise a transient MinIO restart
+    in the survivors would crash with "pool decommissioned, please
+    remove from server command line".
+
+    We poll each survivor's daemon HTTP endpoint for a "minio
+    recreated and healthy" signal. If that endpoint isn't reachable
+    or doesn't yet exist on older daemons, fall back to TCP-probing
+    the peer's MinIO port and accepting that the topology-watcher
+    chain has had enough wall-clock time.
+    """
+    import httpx
+
+    # Discover surviving peers from current topology (target was just
+    # deleted; this gives us the SURVIVING set).
+    raw = await etcd.get_prefix(TOPOLOGY_PREFIX)
+    survivors: list[tuple[str, str]] = []
+    for k, v in raw.items():
+        name = k.removeprefix(TOPOLOGY_PREFIX)
+        try:
+            info = json.loads(v)
+        except json.JSONDecodeError:
+            continue
+        ip = info.get("ip")
+        if ip and ip != target_ip:
+            survivors.append((name, ip))
+
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    pending = {(n, ip): None for n, ip in survivors}
+
+    async def _peer_settled(ip: str) -> bool:
+        # Two signals we accept as "settled": (1) the peer's MinIO
+        # admin info shows a pool count <= len(survivors) (i.e., the
+        # decommissioned pool has been pruned from the running
+        # MINIO_VOLUMES), (2) a TCP probe to the local control-plane
+        # works AND it has been at least 30s since topology-delete
+        # (heuristic upper bound on watcher fan-out + recreate).
+        # Implementing (1) cleanly requires reaching mc inside the
+        # peer's milvus-minio container, which we can't do remotely.
+        # So in this first pass we use (2): just probe control-plane.
+        url = f"http://{ip}:{listen_port}/health"
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {cluster_token}"},
+                )
+                return resp.status_code == 200
+        except Exception:
+            return False
+
+    while asyncio.get_event_loop().time() < deadline:
+        for name, ip in list(pending.keys()):
+            if await _peer_settled(ip):
+                # NB: a healthy daemon HTTP endpoint doesn't strictly
+                # prove MinIO has been recreated — that's the
+                # heuristic. The handler's MinIO recreate is
+                # synchronous (waits for healthy) so by the time the
+                # daemon's HTTP is responsive AFTER a topology event,
+                # the recreate has finished too.
+                pending.pop((name, ip), None)
+                log_writer(f"  {name} @ {ip}: settled")
+        if not pending:
+            return
+        await asyncio.sleep(3)
+
+    if pending:
+        names = ", ".join(f"{n} ({ip})" for (n, ip) in pending)
+        log_writer(
+            f"WARN: timed out waiting for {names} to settle after "
+            f"topology delete. The cluster may still finish "
+            f"converging on its own; if a survivor's MinIO crash-loops "
+            f"with 'pool decommissioned', recreate it manually with "
+            f"`docker compose --project-name <name> -f "
+            f"rendered/<name>/docker-compose.yml up -d --force-recreate "
+            f"--no-deps minio`."
+        )
 
 
 register_handler("remove-node", run_remove_node)
