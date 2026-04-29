@@ -32,6 +32,7 @@ cmd_init() {
   local overwrite=0
   local force=0
   local skip_bootstrap=0
+  local skip_preflight=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -53,6 +54,7 @@ cmd_init() {
       --overwrite)             overwrite=1; shift ;;
       --force)                 force=1; shift ;;
       --skip-bootstrap)        skip_bootstrap=1; shift ;;
+      --skip-preflight)        skip_preflight=1; shift ;;
       -h|--help)               _cmd_init_help; return 0 ;;
       *) die "unknown flag: $1 (try: milvus-onprem init --help)" ;;
     esac
@@ -60,6 +62,14 @@ cmd_init() {
 
   # Resolve the mode — flag wins; otherwise prompt; default standalone.
   mode="$(_init_resolve_mode "$mode")"
+
+  # Pre-flight (skippable). Catches the obvious environment issues
+  # (no docker, port already bound, /data not writable, etc.) BEFORE
+  # we spend 90s spinning up containers that will then fail.
+  if (( ! skip_preflight )); then
+    MODE="$mode" cmd_preflight --local || \
+      die "preflight failed — fix the issues above (or pass --skip-preflight to override)"
+  fi
 
   # Validate cluster-name: only safe characters that won't corrupt
   # cluster.env when sourced as bash (QA finding F-B4.1: spaces in

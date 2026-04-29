@@ -24,14 +24,24 @@ cmd_join() {
   fi
 
   local target="$1" token="$2"; shift 2
-  local local_ip="" resume=0
+  local local_ip="" resume=0 skip_preflight=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --local-ip=*) local_ip="${1#*=}"; shift ;;
-      --resume)     resume=1; shift ;;
+      --local-ip=*)     local_ip="${1#*=}"; shift ;;
+      --resume)         resume=1; shift ;;
+      --skip-preflight) skip_preflight=1; shift ;;
       *) die "unknown flag: $1 (try --help)" ;;
     esac
   done
+
+  # Pre-flight before we start writing files and pulling images.
+  # Catches the obvious environment issues (no docker / port already
+  # bound / /data not writable). The peer-reachability check comes
+  # later, after cluster.env arrives from the leader.
+  if (( ! skip_preflight )); then
+    MODE=distributed cmd_preflight --local || \
+      die "preflight failed — fix the issues above (or pass --skip-preflight to override)"
+  fi
 
   if [[ -f "$CLUSTER_ENV" ]]; then
     if [[ $resume -eq 1 ]] && grep -q "^ETCD_INITIAL_CLUSTER_STATE=existing" "$CLUSTER_ENV"; then

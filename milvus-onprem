@@ -82,6 +82,10 @@ Usage: milvus-onprem <command> [options]
   rotate-token     Rotate CLUSTER_TOKEN atomically across every peer
                    (distributed mode). Avoids the per-peer rotation window
                    where daemon-to-daemon RPCs would otherwise fail.
+  preflight        Pre-deploy sanity check: docker / disk / required ports
+                   free / inter-peer TCP. Run before init or any time to
+                   diagnose. Auto-runs at the top of init/join unless
+                   you pass --skip-preflight to those commands.
 
   help             Show this message.
 
@@ -125,6 +129,7 @@ main() {
     watchdog)        cmd_watchdog        "$@" ;;
     maintenance)     cmd_maintenance     "$@" ;;
     rotate-token)    cmd_rotate_token    "$@" ;;
+    preflight)       cmd_preflight       "$@" ;;
     -h|--help|help)  usage ;;
     *)               err "unknown command: $cmd"; usage; exit 1 ;;
   esac
