@@ -123,8 +123,11 @@ class TopologyHandlers:
 
     # ── primitive operations ─────────────────────────────────────────
 
-    async def _sync_cluster_env_and_render(self) -> bool:
-        """Rebuild cluster.env's PEER_IPS / PEER_NAMES from etcd, then render.
+    async def _sync_cluster_env_and_render(
+        self,
+        override: list[tuple[str, str]] | None = None,
+    ) -> bool:
+        """Rebuild cluster.env's PEER_IPS / PEER_NAMES from topology, render.
 
         PEER_IPS and PEER_NAMES are kept in lockstep, sorted by node-N
         suffix. PEER_NAMES is the stable etcd-side identity for each
@@ -134,13 +137,20 @@ class TopologyHandlers:
         position-based scheme would silently relabel them, leading to
         rendered/<wrong-name>/ on the survivors.
 
+        `override`, when provided, is the [(name, ip), ...] list to
+        use for cluster.env / render — bypassing the watcher's mirror.
+        Used by the recreate-minio-self path so a fresh-from-etcd read
+        can drive the render without polluting the watcher's mirror
+        (which would change subsequent watcher events from ADDED to
+        UPDATED and silently bypass the rolling-recreate trigger).
+
         Returns True on success (or trivially on empty topology), False
         if render failed. Caller uses the return value to decide whether
         downstream actions (nginx reload, MinIO recreate) are safe to
         run — they would otherwise propagate stale config.
         """
         cluster_env_host = os.path.join(REPO_PATH, "cluster.env")
-        ordered = self._current_peer_ips_and_names()
+        ordered = override if override is not None else self._current_peer_ips_and_names()
         if not ordered:
             log.info("render: topology empty, skipping")
             return True
@@ -198,19 +208,35 @@ class TopologyHandlers:
         `/recreate-minio-self` route on api.py calls this directly when
         the leader-driven rolling sweep RPCs in.
 
-        Why we re-fetch topology and re-render before the recreate:
+        We re-render from a FRESH etcd snapshot before the recreate:
         the leader's rolling sweep can RPC us before our own watcher
         has applied the latest topology change (raft replication and
         the watcher's HTTP stream are independent of the leader's RPC
-        path). If we recreated using the OLD rendered/, milvus-minio
-        would come up with stale MINIO_VOLUMES — fewer endpoints than
-        the cluster expects — and refuse to form quorum. Refreshing
-        from etcd directly here is a quorum-protected read that
-        blocks until the local etcd has the latest, sidestepping the
-        race.
+        path). The fresh fetch is passed straight to the render via a
+        local override — we deliberately do NOT overwrite the
+        watcher's `self._topology.peers` mirror, because that would
+        make the watcher reclassify a subsequent ADDED event as
+        UPDATED (the dispatch chain only fires rolling-recreate on
+        ADDED/REMOVED, so a misclassified UPDATED would silently skip
+        the sweep that should have run).
         """
-        await self._refresh_topology_from_etcd()
-        await self._sync_cluster_env_and_render()
+        from .topology import TOPOLOGY_PREFIX
+        import json as _json
+        raw = await self._etcd.get_prefix(TOPOLOGY_PREFIX)
+        fresh: list[tuple[str, str]] = []
+        from .joining import _node_sort_key
+        decoded: dict[str, dict[str, Any]] = {}
+        for k, v in raw.items():
+            name = k.removeprefix(TOPOLOGY_PREFIX)
+            try:
+                decoded[name] = _json.loads(v)
+            except _json.JSONDecodeError:
+                log.warning("ignoring malformed topology entry %s", name)
+        for name in sorted(decoded, key=_node_sort_key):
+            ip = decoded[name].get("ip", "")
+            if ip:
+                fresh.append((name, ip))
+        await self._sync_cluster_env_and_render(override=fresh)
         node_dir = f"{REPO_PATH}/rendered/{self._cfg.node_name}"
         cmd = (
             f"docker compose --project-name {shlex.quote(self._cfg.node_name)} "
@@ -225,33 +251,6 @@ class TopologyHandlers:
         log.info("minio recreated; waiting for healthy")
         await _wait_minio_healthy(timeout_s=self._cfg.rolling_minio_healthy_wait_s)
 
-    async def _refresh_topology_from_etcd(self) -> None:
-        """Force-refresh the in-memory topology mirror from etcd.
-
-        The watcher updates the mirror reactively, but the watcher's
-        HTTP stream and an inbound RPC to /recreate-minio-self can
-        race: a fast RPC after a peer-add may land here before the
-        local watcher has seen the corresponding watch event. Doing
-        an explicit `get_prefix` against etcd is a linearisable read
-        — it returns only after the local etcd has applied the latest
-        write — so the mirror is guaranteed current after this call.
-        """
-        from .topology import TOPOLOGY_PREFIX
-
-        raw = await self._etcd.get_prefix(TOPOLOGY_PREFIX)
-        new_peers: dict[str, dict[str, Any]] = {}
-        import json as _json
-        for k, v in raw.items():
-            name = k.removeprefix(TOPOLOGY_PREFIX)
-            try:
-                new_peers[name] = _json.loads(v)
-            except _json.JSONDecodeError:
-                log.warning("ignoring malformed topology entry %s", name)
-        # In-place replace; we share the same dict object as the
-        # watcher, but every read+write here happens on the asyncio
-        # event loop (no thread races).
-        self._topology.peers = new_peers
-
     async def _rolling_minio_recreate(
         self,
         kind: str,
@@ -260,29 +259,37 @@ class TopologyHandlers:
         """Leader-driven rolling recreate of every peer's MinIO.
 
         Sequenced: leader does itself first (we already have the freshest
-        rendered/), then iterates other peers in sorted node-N order,
-        HTTP-POSTing each peer's /recreate-minio-self with the cluster
-        token. Each call is synchronous — the followers' endpoint
-        doesn't return until its local MinIO is back to healthy — so
-        the leader naturally waits between peers.
+        rendered/), then iterates every other peer in sorted node-N
+        order, HTTP-POSTing each peer's /recreate-minio-self with the
+        cluster token. Each call is synchronous — the followers'
+        endpoint doesn't return until its local MinIO is back to
+        healthy — so the leader naturally waits between peers.
 
-        Skips:
-          - The just-added peer (kind=ADDED, new.ip): its MinIO starts
-            fresh with the right MINIO_VOLUMES via bootstrap, no need
-            to recreate.
-          - The leader itself (handled inline above the loop, not via
-            self-RPC).
+        Why we no longer skip the "just-added" peer: in sequential
+        joins, the new joiner's bootstrap renders its compose with the
+        post-join PEER_IPS so its MinIO starts with the right command
+        and a recreate is redundant. In PARALLEL joins (operator runs
+        join on N peers simultaneously), peers added during another
+        peer's sweep are stranded: the trigger-event's `new.ip` only
+        matches one of them, so subsequent in-flight joiners get
+        RPC'd before their daemons are up (RPC fails harmlessly), and
+        the just-added peer that triggered THIS sweep gets skipped
+        even though by the time the sweep finishes, more peers exist
+        than its bootstrap saw. Always recreating everyone is
+        idempotent: the just-joined peer's RPC may fail with a
+        warning while its daemon is mid-bootstrap, but the next
+        topology event drives a fresh sweep that reaches it. Net
+        cost is a few extra recreates during scale-out; net benefit
+        is correctness under parallel joins.
 
         Failure of any peer logs a warning and continues — partial
         progress is better than aborting and leaving half the cluster
-        on the old MINIO_VOLUMES. The next topology event will retry
-        any missed peer.
+        on the old MINIO_VOLUMES. The next topology event drives a
+        fresh sweep that retries the failed peer.
         """
         # Lazy import — keeps module-load free of httpx if a deployment
         # never reaches this code path (standalone mode etc.).
         import httpx
-
-        skip_ip = (new or {}).get("ip") if kind == "ADDED" else None
 
         # Self first — must be done before we ask peers to do theirs,
         # so the new MINIO_VOLUMES propagates from a known-up MinIO.
@@ -297,10 +304,6 @@ class TopologyHandlers:
             info = self._topology.peers.get(name) or {}
             ip = info.get("ip")
             if not ip or ip == self._cfg.local_ip:
-                continue
-            if ip == skip_ip:
-                log.info("rolling MinIO recreate: skipping new peer %s "
-                         "(its MinIO starts with the right layout)", name)
                 continue
 
             url = f"http://{ip}:{self._cfg.listen_port}/recreate-minio-self"
