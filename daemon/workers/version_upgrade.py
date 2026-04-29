@@ -48,7 +48,8 @@ from ._shell_helpers import run_in_repo
 log = logging.getLogger("daemon.workers.version_upgrade")
 
 REPO_PATH = "/repo"
-CLUSTER_ENV_PATH = "/etc/milvus-onprem/cluster.env"
+# Read via /repo/cluster.env (directory mount, live) — see _shell_helpers.
+CLUSTER_ENV_PATH = "/repo/cluster.env"
 HEALTH_TIMEOUT_S = 180  # how long to wait for milvus to come back up
 
 

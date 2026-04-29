@@ -387,18 +387,29 @@ async def _run(cmd: str) -> tuple[int, str, str]:
 
 
 def _read_cluster_env_value(key: str, default: str = "") -> str:
-    """Read a single KEY=VALUE from the bind-mounted cluster.env."""
-    try:
-        with open("/etc/milvus-onprem/cluster.env") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                if k.strip() == key:
-                    return v.strip().strip('"').strip("'")
-    except FileNotFoundError:
-        pass
+    """Read a single KEY=VALUE from the bind-mounted cluster.env.
+
+    Reads via /repo/cluster.env (the directory-mount path) rather than
+    /etc/milvus-onprem/cluster.env (the file-mount path). Single-file
+    bind mounts in Docker capture an inode at attach time; when the
+    host atomically replaces the file via temp-write + rename (see
+    daemon/handlers.py:_upsert_kv), the file-mount stays pinned to
+    the now-deleted old inode and reads return stale content. The
+    directory mount is live — the new file appears immediately.
+    """
+    for path in ("/repo/cluster.env", "/etc/milvus-onprem/cluster.env"):
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    if k.strip() == key:
+                        return v.strip().strip('"').strip("'")
+            return default
+        except FileNotFoundError:
+            continue
     return default
 
 

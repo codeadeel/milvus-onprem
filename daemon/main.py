@@ -58,10 +58,13 @@ async def _register_cluster_version(etcd: EtcdClient) -> None:
     exists. The version-upgrade worker explicitly overwrites this on
     successful rollout.
     """
-    # Read MILVUS_IMAGE_TAG from cluster.env. The daemon container has
-    # cluster.env bind-mounted read-only at /etc/milvus-onprem/cluster.env.
+    # Read MILVUS_IMAGE_TAG from cluster.env. We read through the
+    # directory bind-mount at /repo/cluster.env (not the legacy
+    # single-file mount at /etc/milvus-onprem/cluster.env) — atomic-
+    # rename writes from handlers._upsert_kv would leave the file mount
+    # pinned to a stale inode.
     try:
-        with open("/etc/milvus-onprem/cluster.env") as f:
+        with open("/repo/cluster.env") as f:
             for line in f:
                 if line.startswith("MILVUS_IMAGE_TAG="):
                     tag = line.partition("=")[2].strip()

@@ -38,9 +38,11 @@ from .topology import TOPOLOGY_PREFIX
 
 log = logging.getLogger("daemon.joining")
 
-# Bind-mount target inside the daemon container — the leader reads
-# cluster.env from here when building the joiner's copy.
-CLUSTER_ENV_PATH = Path("/etc/milvus-onprem/cluster.env")
+# Read via the directory-mount path so atomic-rename writes from
+# handlers._upsert_kv don't leave us pinned to a stale inode (the
+# legacy /etc/milvus-onprem/cluster.env is a single-file bind mount,
+# which Docker captures by inode at attach time and never refreshes).
+CLUSTER_ENV_PATH = Path("/repo/cluster.env")
 
 # Single async lock — one /join handled at a time per leader to avoid
 # racing on node-name allocation or partial etcd member state.

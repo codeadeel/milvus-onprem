@@ -27,7 +27,10 @@ from ..jobs import JobContext
 log = logging.getLogger("daemon.workers.shell")
 
 REPO_PATH = "/repo"
-CLUSTER_ENV_PATH = "/etc/milvus-onprem/cluster.env"
+# /repo/cluster.env (directory mount) instead of the file mount at
+# /etc/milvus-onprem/cluster.env. Atomic-rename writes invalidate
+# single-file bind mounts; the directory mount sees new content live.
+CLUSTER_ENV_PATH = "/repo/cluster.env"
 
 # Paths under /repo that a worker subprocess might write to. We chown
 # these back to the operator's UID/GID after each subprocess exits.

@@ -36,7 +36,7 @@ from .leader import LeaderElector
 log = logging.getLogger("daemon.handlers")
 
 REPO_PATH = "/repo"  # bind-mounted from the host's milvus-onprem dir
-CLUSTER_ENV_PATH = "/etc/milvus-onprem/cluster.env"  # read-only mount
+CLUSTER_ENV_PATH = "/repo/cluster.env"  # directory-mount; see _shell_helpers
 
 
 class TopologyHandlers:
