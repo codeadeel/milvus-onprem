@@ -93,12 +93,56 @@ EOF
   _remove_node_via_daemon "$ip"
 }
 
-# POST a remove-node job to the local daemon and poll until done.
+# POST a remove-node job to the right daemon and poll until done.
+#
+# When the target IS the current leader we can't use the local daemon
+# end-to-end: the worker on the local daemon would step itself down,
+# forward the job to the new leader, and try to track the forwarded
+# job — but as the actual remove progresses, the local etcd is
+# removed from cluster membership and the local daemon's /jobs reads
+# start hanging. So the CLI orchestrates the failover here:
+#   1. read /leader to find the current leader
+#   2. if target == leader, POST /admin/step-down on the local daemon,
+#      poll /leader until a different peer wins the next term, then
+#      POST /jobs directly to that new leader's daemon
+#   3. else, fall through to the simple submit-locally path
 _remove_node_via_daemon() {
   local ip="$1"
-  local cp_url="http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}"
+  local local_cp="http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}"
   local token="${CLUSTER_TOKEN:-}"
   [[ -n "$token" ]] || die "CLUSTER_TOKEN missing in cluster.env"
+
+  local cp_url="$local_cp"
+  local leader_ip=""
+  leader_ip=$(curl -fsS --max-time 5 -H "Authorization: Bearer $token" \
+    "$local_cp/leader" 2>/dev/null \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); l=d.get('leader'); print(l['ip'] if l else '')" 2>/dev/null) \
+    || true
+  if [[ "$leader_ip" == "$ip" ]]; then
+    info "target $ip is the current leader — orchestrating failover"
+    info "==> POST /admin/step-down on $local_cp"
+    curl -fsS --max-time 10 -X POST \
+      -H "Authorization: Bearer $token" \
+      "$local_cp/admin/step-down" >/dev/null \
+      || die "step-down request failed — local daemon unreachable?"
+    info "step-down accepted; waiting for a new leader to win the next term"
+    local new_leader_ip=""
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      sleep 3
+      new_leader_ip=$(curl -fsS --max-time 5 \
+        -H "Authorization: Bearer $token" "$local_cp/leader" 2>/dev/null \
+        | python3 -c "import json,sys; d=json.load(sys.stdin); l=d.get('leader'); print(l['ip'] if l else '')" 2>/dev/null) \
+        || true
+      if [[ -n "$new_leader_ip" && "$new_leader_ip" != "$ip" ]]; then
+        ok "new leader is $new_leader_ip"
+        break
+      fi
+    done
+    [[ -n "$new_leader_ip" && "$new_leader_ip" != "$ip" ]] \
+      || die "no new leader elected within 30s; aborting remove-node — cluster may need manual intervention"
+    cp_url="http://${new_leader_ip}:${CONTROL_PLANE_PORT:-19500}"
+  fi
 
   local body
   body=$(python3 -c "

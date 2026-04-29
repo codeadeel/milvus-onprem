@@ -491,6 +491,30 @@ async def post_admin_sweep(request: Request) -> dict[str, Any]:
 
 
 @router.post(
+    "/admin/step-down",
+    dependencies=[Depends(require_token)],
+    tags=["internal"],
+)
+async def post_admin_step_down(request: Request) -> dict[str, Any]:
+    """Voluntarily release leadership. Used by the operator's CLI to
+    orchestrate a leader self-removal (`remove-node --ip=<leader>`)
+    without having to ssh into the leader peer.
+
+    Returns 409 if this daemon isn't currently the leader — the CLI
+    is expected to have called `/leader` first and direct the
+    step-down to the right peer.
+    """
+    leader = request.app.state.leader
+    if not leader.is_leader:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="not currently the leader; step-down rejected",
+        )
+    stepped = await leader.step_down(cooldown_s=20.0)
+    return {"stepped_down": bool(stepped)}
+
+
+@router.post(
     "/recreate-minio-self",
     dependencies=[Depends(require_token)],
     tags=["internal"],
