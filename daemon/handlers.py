@@ -251,6 +251,56 @@ class TopologyHandlers:
         log.info("minio recreated; waiting for healthy")
         await _wait_minio_healthy(timeout_s=self._cfg.rolling_minio_healthy_wait_s)
 
+        # After topology change, Milvus services on every peer have a
+        # newly-rendered milvus.yaml that may list different etcd
+        # endpoints (peer added/removed) and a different
+        # PULSAR_HOST_IP. milvus reads its yaml only at container
+        # startup, so a running Milvus keeps grpc-retrying a now-dead
+        # endpoint forever (post remove-node) or doesn't notice an
+        # added peer (post join). Bounce the affected Milvus services
+        # so they pick up the new yaml. Filter against
+        # `docker compose config --services` so we only touch services
+        # actually present in this peer's compose. The daemon
+        # container is deliberately NOT in the list — recreating the
+        # daemon while this method runs would SIGKILL ourselves
+        # mid-call (same problem rotate-token's sidecar fix avoids).
+        compose_arg = (
+            f"--project-name {shlex.quote(self._cfg.node_name)} "
+            f"-f {shlex.quote(node_dir)}/docker-compose.yml"
+        )
+        rc, out, err = await _run(
+            f"docker compose {compose_arg} config --services"
+        )
+        if rc != 0:
+            log.warning(
+                "docker compose config --services failed post-minio "
+                "(rc=%d): %s — skipping Milvus refresh",
+                rc, err.strip()[:300],
+            )
+            return
+        present = set(out.split())
+        wanted = {
+            "mixcoord", "datanode", "querynode",
+            "indexnode", "streamingnode", "proxy",
+        }
+        to_recreate = sorted(present & wanted)
+        if not to_recreate:
+            return
+        cmd = (
+            f"docker compose {compose_arg} up -d --force-recreate "
+            f"--no-deps {' '.join(to_recreate)}"
+        )
+        rc, out, err = await _run(cmd)
+        if rc != 0:
+            log.warning(
+                "milvus services recreate after topology change "
+                "failed (rc=%d): %s",
+                rc, err.strip()[:400],
+            )
+            return
+        log.info("milvus services recreated post topology change: %s",
+                 ", ".join(to_recreate))
+
     async def apply_pulsar_host_change(self, new_pulsar_host: str) -> None:
         """Update PULSAR_HOST in this peer's cluster.env, re-render, and
         recreate the milvus + pulsar services so they pick up the new
