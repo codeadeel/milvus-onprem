@@ -96,17 +96,23 @@ cmd_init() {
       || die "couldn't auto-detect local IP from \`hostname -I\`. Pass --local-ip=<ip> explicitly."
   fi
 
-  # Pre-flight: --data-root must be writable (or its parent must be,
-  # so we can create it). QA finding F-B4.2: pointing init at e.g.
-  # /proc/sys/kernel used to print mkdir errors but continue.
-  local data_parent
-  data_parent="$(dirname "$data_root")"
-  if [[ ! -d "$data_root" && ! -w "$data_parent" ]]; then
-    die "--data-root=$data_root: parent directory $data_parent is not writable. Pick a path on a writable filesystem (default /data; common alternatives /var/lib/milvus, ~/milvus-data)."
-  fi
-  if [[ -d "$data_root" && ! -w "$data_root" ]]; then
-    die "--data-root=$data_root exists but is not writable by user $(id -un). Fix with \`sudo chown $(id -un) $data_root\` or pick a different path."
-  fi
+  # Pre-flight: --data-root must be on a sane path. QA finding
+  # F-B4.2: pointing init at e.g. /proc/sys/kernel used to print
+  # mkdir errors but continue. Hard-block on filesystems where
+  # mkdir is structurally impossible (/proc, /sys, /dev). For
+  # ordinary paths the parent might be / or a system dir; host_prep
+  # handles `sudo mkdir -p` + `sudo chown`, so a path that's not
+  # currently writable by us is fine as long as we can sudo.
+  case "$data_root" in
+    /proc/*|/sys/*|/dev/*)
+      die "--data-root=$data_root is on a virtual filesystem ($data_root) that doesn't accept regular file/directory writes. Pick a real-storage path (default /data; alternatives /var/lib/milvus, ~/milvus-data)."
+      ;;
+  esac
+  # Sanity: must be absolute.
+  case "$data_root" in
+    /*) ;;
+    *) die "--data-root=$data_root must be absolute (start with '/')" ;;
+  esac
 
   # Default the Milvus image tag if not given.
   : "${milvus_image_tag:=v2.6.11}"
