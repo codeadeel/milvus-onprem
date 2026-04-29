@@ -9,9 +9,8 @@ deployment. Selected automatically by `lib/render.sh` when
 > [README's "Supported environments"](../../README.md#supported-environments)
 > for the full list.
 
-> ⚠ **2.5 has a single point of failure for writes** — see
-> [SPOF caveat](#spof-caveat-the-pulsar-singleton) below. If you can,
-> use 2.6 instead (Woodpecker WAL eliminates the SPOF).
+> ⚠ **Single point of failure for writes** — see
+> [SPOF caveat](#spof-caveat-the-pulsar-singleton) below.
 
 ## What this version's deploy looks like
 
@@ -67,9 +66,8 @@ flowchart LR
   S1 <-.->|erasure coding| SN
 ```
 
-The structure is the same as 2.6 with one addition: **a Pulsar singleton
-on the PULSAR_HOST node**. All Milvus instances on all nodes connect to
-this single broker for the message queue.
+Every Milvus instance on every node connects to the **Pulsar singleton
+on the PULSAR_HOST node** for the message queue.
 
 The "Milvus 2.5" box in the diagram is actually 5 sibling containers
 per node (`milvus-mixcoord`, `milvus-proxy`, `milvus-querynode`,
@@ -107,18 +105,39 @@ Consequences:
   redeploy Pulsar. There's no automation for this in v0.
 
 If you can accept this trade-off (e.g. dev / staging, batch-only ingest
-workloads, write outage tolerable), this is fine. If you need true HA on
-2.5, your options are:
+workloads, write outage tolerable), this is fine. If you need true HA,
+your options are:
 
-1. **Use Milvus 2.6 + Woodpecker** — no Pulsar at all. Recommended.
-2. **Point at an external Pulsar cluster** — set
+1. **Point at an external Pulsar cluster** — set
    `PULSAR_HOST=<external-pulsar-ip>` and remove the local Pulsar
    service from your compose. Right answer if you already have a
    Pulsar SRE team; operationally cleanest.
-3. **Run Pulsar HA in-cluster** — design + scaffolding live in
+2. **Run Pulsar HA in-cluster** — design + scaffolding live in
    [`docs/PULSAR_HA.md`](../../docs/PULSAR_HA.md). Adds 9 containers
    (3 ZK + 3 BK + 3 broker) to a 3-node cluster. *Not yet
    implemented* — design-doc only at this point.
+
+## Why coord-mode-cluster
+
+Milvus 2.5 cannot run multi-node HA in `milvus run standalone` —
+multiple standalone instances panic on rootcoord election when they
+share an etcd. So this template deploys the components separately:
+
+- `milvus-mixcoord` runs all 4 coordinators (rootcoord + datacoord +
+  querycoord + indexcoord) co-resident with `enableActiveStandby: true`
+  on each. One per node; etcd-CAS picks the active leader, the others
+  stand by and watch the lease.
+- `milvus-proxy` is the gRPC entry on `${MILVUS_PORT}` (default
+  `19530`); what nginx LBs across peers.
+- `milvus-querynode` is the query/search worker.
+- `milvus-datanode` is the ingest worker.
+- `milvus-indexnode` is the index-build worker.
+
+The container running the consolidated coord uses `milvus run mixture`
+(the 2.5 CLI name for the consolidated role), and needs the four
+`-rootcoord/-datacoord/-querycoord/-indexcoord=true` flags passed
+explicitly even though `--help` claims they default to true. Without
+them the mixture process starts but never opens the coord gRPC ports.
 
 ## Files
 
@@ -127,40 +146,30 @@ workloads, write outage tolerable), this is fine. If you need true HA on
 | [`docker-compose.yml.tpl`](docker-compose.yml.tpl) | Five services on the Pulsar host, four on every other node. |
 | [`_pulsar-service.yml.tpl`](_pulsar-service.yml.tpl) | The Pulsar service block, conditionally inlined into the host node's compose by `lib/render.sh`. The leading underscore is a convention — `render_all` skips `_*.tpl` files when rendering, so this fragment is only used as included content. |
 | [`milvus.yaml.tpl`](milvus.yaml.tpl) | Milvus config — `mq.type=pulsar`, points at PULSAR_HOST_IP. |
-| [`nginx.conf.tpl`](nginx.conf.tpl) | Same TCP load balancer as 2.6 (Milvus version doesn't matter here). |
+| [`nginx.conf.tpl`](nginx.conf.tpl) | TCP load balancer with all peers as upstreams. |
 
 ## Tested patch versions
 
 | Milvus version | Status |
 |---|---|
-| `v2.5.4` (default) | **Validated end-to-end on real hardware** — 3-node bootstrap, smoke + 10-step tutorial + cross-peer replication-proof, mixcoord active-standby (<500ms failover drill), per-component healthchecks + watchdog auto-restart drill, Pulsar pre-flight + skip_flush path, backup round-trip incl. cross-version 2.5→2.6, rolling upgrade drill. |
+| `v2.5.4` (default) | **Validated end-to-end on real hardware** — 3-node bootstrap, smoke + 10-step tutorial + cross-peer replication-proof, mixcoord active-standby (<500ms failover drill), per-component healthchecks + watchdog auto-restart drill, Pulsar pre-flight + skip_flush path, backup round-trip, rolling upgrade drill. |
 | Other 2.5.x patches | Untested. Patch-level upgrades expected to work; bump `MILVUS_IMAGE_TAG` and re-render. |
 
-## What changes between 2.5 and 2.6
+## Failover behavior
 
-| Concern | 2.5 | 2.6 |
-|---|---|---|
-| Default WAL / MQ | Pulsar (required) | Woodpecker (embedded, default) |
-| Coord topology | Per-component containers in mixture mode (`mixcoord` + 4 workers) with `enableActiveStandby: true` on each coord | Single `milvus run standalone` binary per node, coord co-located with workers |
-| Singleton SPOF | Pulsar broker (writes); coord layer is HA via active-standby | None (Woodpecker is embedded) |
-| Containers per node | 9 (or 10 on PULSAR_HOST) | 4 |
-| Cross-version upgrade | Backup + restore (cross-major) | — |
+Recovery from a single-node loss takes ~15-20s with the tunings shipped
+in `milvus.yaml.tpl`:
 
-If you're starting fresh, **strongly prefer 2.6** unless you have an
-external constraint (e.g. existing 2.5 data, library compatibility).
+```yaml
+common:
+  session:
+    ttl: 10                         # was 30 — etcd lease expires faster
+queryCoord:
+  checkNodeSessionInterval: 10      # was 60 — detect dead node sooner
+  heartbeatAvailableInterval: 5000  # was 10000 — shorter heartbeat window
+```
 
-## Cross-major upgrade (2.5 → 2.6)
-
-Cross-major upgrades require a planned migration:
-
-1. `milvus-onprem create-backup --name=pre-2.6-upgrade` on your live 2.5 cluster.
-2. Export the backup off-cluster (`mc cp -r local/milvus-bucket/backup/pre-2.6-upgrade/ /safe/path/`).
-3. `milvus-onprem teardown --full --force` on every node.
-4. Edit `cluster.env` on the bootstrap node: `MILVUS_IMAGE_TAG=v2.6.11`,
-   delete the `MQ_TYPE=pulsar` line so the default (woodpecker) applies.
-5. Re-deploy from scratch as 2.6: `init` (with `--overwrite`) → `pair` →
-   peers `join` → `bootstrap` on bootstrap node.
-6. `milvus-onprem restore-backup --from=/safe/path/pre-2.6-upgrade` on
-   the bootstrap node. Pulsar's gone; Woodpecker takes over.
-
-Plan a maintenance window — this is a hard cutover, not a rolling upgrade.
+In-flight reads during the window get `code=106 collection on
+recovering`. Use the `retry_on_recovering` helper from
+`test/tutorial/_shared.py` — it's load-bearing on this version. See
+[`docs/FAILOVER.md`](../../docs/FAILOVER.md) for the full drill writeup.

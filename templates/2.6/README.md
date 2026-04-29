@@ -78,17 +78,15 @@ Four containers per node, all on host networking:
 - **Woodpecker is the default WAL.** Milvus 2.6 introduced an embedded
   write-ahead log called Woodpecker; the templates wire it up via
   `mq.type: woodpecker` in `milvus.yaml`. **No separate Pulsar / Kafka
-  cluster is deployed** — that's the main reason 2.6 is dramatically
-  simpler to operate than 2.5.
-- **Coordinator consolidation.** 2.6 merges the four 2.5 coordinators
-  (rootcoord/datacoord/querycoord/indexcoord) into a single `mixcoord`
-  process. The templates don't touch this directly but it's why
-  `milvus run standalone` works as a clustered binary.
+  cluster is deployed** — keeps the operational surface small.
+- **Coordinator consolidation.** 2.6 runs all four coordinator roles
+  (rootcoord/datacoord/querycoord/indexcoord) inside the single
+  `milvus run standalone` binary. The templates don't touch this
+  directly but it's why a single binary works as a clustered process.
 - **`cloudProvider: aws` for MinIO.** 2.6 dropped `minio` as a valid
   value for `cloudProvider` — the segcore filesystem only accepts
   `aws`, `gcp`, `azure`, `aliyun`, or `tencent`. Since MinIO speaks
-  the S3 API, `aws` works correctly. We hard-pin this in the template
-  to avoid the regression we hit on milvusDeploy.
+  the S3 API, `aws` works correctly. We hard-pin this in the template.
 
 ## Files
 
@@ -122,9 +120,12 @@ milvus-onprem render && milvus-onprem up
 If a future `v2.6.x` introduces a config-key change that breaks this
 template, please open an issue or PR with the fix.
 
-## Cross-major upgrades (e.g. 2.6 → 2.7)
+## Failover behavior
 
-Drop in `templates/2.7/` with the three corresponding files. The engine
-auto-routes based on `MILVUS_IMAGE_TAG`. Changing major.minor on a live
-cluster requires a planned migration — see `docs/UPGRADES.md` (planned
-for v0.x).
+Single-node loss is invisible to the SDK — bare reads keep working,
+no recovery window observed in our drills. Each node's `milvus run
+standalone` binary co-locates its own coord + querynode +
+streamingnode (Woodpecker WAL), so when a node dies the surviving
+nodes' replicas keep serving without waiting for a centralized
+querycoord to re-shuffle channel ownership. See
+[`docs/FAILOVER.md`](../../docs/FAILOVER.md) for the drill writeup.

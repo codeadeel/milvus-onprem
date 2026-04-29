@@ -1,16 +1,9 @@
-# milvus-onprem
-
-**HA Milvus 2.5 / 2.6 across N Linux VMs — no Kubernetes.**
+# HA Milvus on Linux VMs — no Kubernetes
 
 A single CLI plus a small Python control-plane daemon that gives you
 the missing rung between single-host Milvus standalone and a full
 Kubernetes Operator deploy. Designed for shops with a fleet of plain
 Linux VMs and no cluster orchestrator.
-
-> **Status: v1.2** — hardware-validated end-to-end on 4-VM clusters
-> for both Milvus 2.6.11 and 2.5.4. 9 rounds of adversarial QA with
-> 23 findings and 25 fixes shipped. See [docs/QA_REPORT.md](docs/QA_REPORT.md)
-> for the full audit trail.
 
 ## Architecture
 
@@ -156,24 +149,6 @@ For the full walkthrough with hardware-validated outputs:
 
 Legend: ✅ live-validated · 📖 logic-reviewed · ⚠️ works with caveats · ❌ not implemented · ➖ N/A
 
-## Documentation index
-
-| Read this | When |
-|---|---|
-| **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)** | **First-time deploy.** Prerequisites, install, init, join, smoke. ~15 min. |
-| [docs/TUTORIAL.md](docs/TUTORIAL.md) | Deeper walkthrough — every shipped feature on a real 4-VM cluster, with hardware-validated outputs. |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the components fit together. Read this when something surprises you. |
-| [docs/CONFIG.md](docs/CONFIG.md) | `cluster.env` reference. Every variable, every default. |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-2 ops: backup, scale-out, status, alert formats. |
-| [docs/FAILOVER.md](docs/FAILOVER.md) | What happens when a node dies. 2.5 vs 2.6 behavior + retry pattern. |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → fix table. Real bugs we've actually hit. |
-| [docs/CONTROL_PLANE.md](docs/CONTROL_PLANE.md) | Daemon internals: leader election, jobs, watchdog, design rationale. |
-| [docs/PULSAR_HA.md](docs/PULSAR_HA.md) | Design for in-cluster Pulsar HA on 2.5 (not yet implemented). |
-| [docs/QA_REPORT.md](docs/QA_REPORT.md) | The 9-round QA audit trail: 23 findings, 25 fixes. |
-| [daemon/README.md](daemon/README.md) | Per-file walkthrough of the Python daemon. |
-| [templates/2.5/README.md](templates/2.5/README.md) · [templates/2.6/README.md](templates/2.6/README.md) | Per-version topology notes. |
-| [test/tutorial/README.md](test/tutorial/README.md) | 10-step pymilvus walkthrough for app developers. |
-
 ## Supported environments
 
 **Cloud-agnostic by design** — runs on any Linux VM with Docker.
@@ -207,6 +182,24 @@ Linux distro · a specific arch (amd64 + arm64 both work).
 Even sizes (2, 4, 6, 8) are accepted with a warning — they tolerate the
 same loss count as the next-lower odd size, so 4 ≈ 3 from a fault-tolerance
 angle. Useful as a transient state during scale-out.
+
+## Documentation index
+
+| Read this | When |
+|---|---|
+| **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)** | **First-time deploy.** Prerequisites, install, init, join, smoke. ~15 min. |
+| [docs/TUTORIAL.md](docs/TUTORIAL.md) | Deeper walkthrough — every shipped feature on a real 4-VM cluster, with hardware-validated outputs. |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the components fit together. Read this when something surprises you. |
+| [docs/CONFIG.md](docs/CONFIG.md) | `cluster.env` reference. Every variable, every default. |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-2 ops: backup, scale-out, status, alert formats. |
+| [docs/FAILOVER.md](docs/FAILOVER.md) | What happens when a node dies. 2.5 vs 2.6 behavior + retry pattern. |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → fix table. Real bugs we've actually hit. |
+| [docs/CONTROL_PLANE.md](docs/CONTROL_PLANE.md) | Daemon internals: leader election, jobs, watchdog, design rationale. |
+| [docs/PULSAR_HA.md](docs/PULSAR_HA.md) | Design for in-cluster Pulsar HA on 2.5 (not yet implemented). |
+| [docs/QA_REPORT.md](docs/QA_REPORT.md) | The 9-round QA audit trail: 23 findings, 25 fixes. |
+| [daemon/README.md](daemon/README.md) | Per-file walkthrough of the Python daemon. |
+| [test/tutorial/README.md](test/tutorial/README.md) | 10-step pymilvus walkthrough for app developers. |
+
 
 ## License
 
