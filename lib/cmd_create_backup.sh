@@ -66,6 +66,20 @@ EOF
   env_require
   role_detect
 
+  # Pre-flight name validation — milvus-backup v0.5.x rejects hyphens
+  # and various special characters with a confusing
+  # "Error: invalid backup name <name>" thrown deep inside its CLI.
+  # Catch it earlier so the operator sees an actionable message
+  # before we spin up the binary or POST a job. (QA finding F1.4.)
+  if [[ -n "$name" ]]; then
+    if ! [[ "$name" =~ ^[A-Za-z0-9_]+$ ]]; then
+      die "--name=\"$name\" must match ^[A-Za-z0-9_]+$ (letters, digits, underscore only — milvus-backup rejects hyphens, spaces, dots, and other shell metacharacters)"
+    fi
+    if (( ${#name} > 100 )); then
+      die "--name length ${#name} > 100; pick a shorter name (milvus-backup has its own internal limit)"
+    fi
+  fi
+
   # Route through the persistent control plane in distributed mode.
   # The daemon's worker calls back into THIS script with the env var
   # MILVUS_ONPREM_INTERNAL=1 set, which is the recursion guard.
@@ -73,6 +87,17 @@ EOF
         && "${MILVUS_ONPREM_INTERNAL:-}" != "1" \
         && "$list_only" -eq 0 ]]; then
     [[ -n "$name" ]] || die "--name is required"
+    # Pre-flight duplicate check (QA finding F3.2). milvus-backup
+    # exits with "Error: backup with name X already exist" buried
+    # under a stack trace; catch it here while we still have a clean
+    # operator-facing context. `mc ls` returns rc=0 even for a
+    # non-existent prefix (just empty output), so we have to look at
+    # the output content rather than just the exit code.
+    if [[ -n "$(docker exec milvus-minio mc ls --quiet \
+         "local/milvus-bucket/backup/${name}/" 2>/dev/null \
+         | head -1)" ]]; then
+      die "--name=\"$name\" already exists in MinIO at milvus-bucket/backup/$name/. Pick a different name, or remove the existing one with: docker exec milvus-minio mc rm --recursive --force local/milvus-bucket/backup/$name"
+    fi
     _create_backup_via_daemon "$name" "$collections" "$strategy"
     return $?
   fi

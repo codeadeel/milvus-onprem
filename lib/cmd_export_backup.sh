@@ -61,18 +61,19 @@ EOF
   env_require
   role_detect
 
-  # Distributed mode: route via the daemon's /jobs (same recursion
-  # guard as create-backup). The bash command runs locally on the
-  # daemon-host (docker exec into milvus-minio, docker cp to the host
-  # path), so the destination path is interpreted on whichever node
-  # the daemon decided to schedule the job — for v1.1 that's always
-  # the leader. Operator should pick a path that exists / makes sense
-  # there; cluster-wide export-to-anywhere is a v1.2 concern.
-  if [[ "${MODE:-standalone}" == "distributed" \
-        && "${MILVUS_ONPREM_INTERNAL:-}" != "1" ]]; then
-    _export_backup_via_daemon "$name" "$to_path"
-    return $?
-  fi
+  # Run LOCALLY regardless of mode (resolves QA finding F-A.1).
+  # MinIO is distributed across all peers, so the backup contents are
+  # equally accessible from any peer's local milvus-minio container.
+  # Routing through /jobs would land the file on the leader's host
+  # filesystem instead of the invoking peer's — which is what the
+  # operator expects when they pass `--to=/tmp/foo`. By skipping
+  # /jobs and doing the docker exec / docker cp here, the file lands
+  # on whichever host the operator actually invoked from.
+  #
+  # Auth implication: this runs as the operator on the host, so they
+  # already have cluster.env access and docker socket privileges
+  # (same as the local-mode create-backup path). No CLUSTER_TOKEN
+  # needed because nothing crosses the network.
 
   # Cheap pre-flight: verify the backup exists in MinIO before we start
   # creating destination dirs and running mc.
@@ -104,19 +105,6 @@ EOF
   docker exec milvus-minio rm -rf "${container_tmp}" 2>/dev/null
 
   ok "exported to ${to_path}/"
-  # Distributed-mode hint: in distributed mode the export job runs on
-  # the leader, so $to_path lives on the leader's filesystem — not on
-  # whichever peer the operator invoked the command from. QA finding
-  # F-A.1. Surface it loudly so operators don't go hunting for the
-  # file on the wrong host.
-  if [[ "${MODE:-standalone}" == "distributed" ]]; then
-    info ""
-    info "Note: in distributed mode this file lives on the LEADER's"
-    info "filesystem (not necessarily this host). To find the leader:"
-    info "    ./milvus-onprem status      # 'this node' line"
-    info "Or scp it back manually:"
-    info "    scp <leader>:${to_path} ./"
-  fi
   info ""
   info "to restore on any cluster:"
   info "    milvus-onprem restore-backup --from=${to_path}"
@@ -126,27 +114,9 @@ EOF
   info "      local/milvus-bucket/backup/${name}"
 }
 
-# POST an export-backup job to the local daemon and poll until done.
-_export_backup_via_daemon() {
-  local name="$1" to_path="$2"
-  local cp_url="http://127.0.0.1:${CONTROL_PLANE_PORT:-19500}"
-  local token="${CLUSTER_TOKEN:-}"
-  [[ -n "$token" ]] || die "CLUSTER_TOKEN missing in cluster.env"
-
-  local body
-  body=$(python3 -c "
-import json
-print(json.dumps({'type':'export-backup','params':{'name':'$name','to':'$to_path'}}))
-")
-  info "==> POST /jobs (export-backup name=$name to=$to_path) on $cp_url"
-  local resp
-  resp=$(curl -fsS --location-trusted --max-time 30 \
-    -H "Authorization: Bearer $token" \
-    -H "Content-Type: application/json" \
-    -d "$body" "$cp_url/jobs") \
-    || die "POST /jobs failed — daemon unreachable?"
-  local job_id
-  job_id=$(printf '%s' "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-  ok "job created: $job_id"
-  _poll_job "$job_id" "$cp_url" "$token"
-}
+# (export-backup runs LOCALLY now — see comment in cmd_export_backup.
+# Previously routed via the daemon's /jobs but the file landed on the
+# leader's host filesystem, surprising operators on multi-host
+# clusters. Keeping just a stub here for any external scripts that
+# imported this lib by file path; harmless empty function.)
+_export_backup_via_daemon() { :; }
