@@ -81,11 +81,65 @@ async def run_remove_node(ctx: JobContext) -> None:
         try:
             li = json.loads(leader_info_raw)
             if li.get("ip") == target_ip or li.get("node_name") == target_name:
-                raise PermissionError(
-                    f"refusing to remove {target_name} because it is the "
-                    f"current leader. failover first (e.g. `docker stop "
-                    f"milvus-onprem-cp` on {target_ip}, wait ~15s, then retry)."
+                # Self-removal of the current leader: voluntarily step
+                # down, wait for a peer to take over, then re-route the
+                # remove-node job to that new leader so the worker runs
+                # on a non-target peer. This used to refuse with an
+                # operator-facing message that asked the operator to
+                # `docker stop` the daemon on a specific peer; now the
+                # daemon orchestrates the failover itself.
+                #
+                # `_failover_attempted` flag in params guards against an
+                # infinite loop if the new leader is again the target
+                # (shouldn't happen because of the cooldown in
+                # LeaderElector.step_down, but defensive).
+                if ctx.job.params.get("_failover_attempted"):
+                    raise PermissionError(
+                        f"refusing to remove {target_name}: re-attempt "
+                        f"after self-failover still landed on the target. "
+                        f"Cluster may have only this peer eligible — "
+                        f"verify topology and try again."
+                    )
+                ctx.log_writer(
+                    f"target {target_name} is the current leader; "
+                    f"stepping down and re-routing the job to a peer"
                 )
+                if not await leader.step_down(cooldown_s=20.0):
+                    raise PermissionError(
+                        f"refusing to remove {target_name}: "
+                        f"step_down failed (already a follower? cluster "
+                        f"is in transient state — retry shortly)."
+                    )
+                new_leader_ip = await _wait_new_leader(
+                    etcd, exclude_ip=target_ip, timeout_s=30.0
+                )
+                if new_leader_ip is None:
+                    raise RuntimeError(
+                        "self-failover: no new leader elected within 30s "
+                        "after stepping down. Cluster may need manual "
+                        "intervention."
+                    )
+                ctx.log_writer(
+                    f"new leader is {new_leader_ip}; forwarding "
+                    f"remove-node job"
+                )
+                forwarded_id = await _forward_remove_node(
+                    new_leader_ip,
+                    target_ip,
+                    config.cluster_token,
+                    config.listen_port,
+                )
+                ctx.log_writer(
+                    f"forwarded as job {forwarded_id} on the new leader"
+                )
+                await _wait_forwarded_job(
+                    new_leader_ip,
+                    forwarded_id,
+                    config.cluster_token,
+                    config.listen_port,
+                    log_writer=ctx.log_writer,
+                )
+                return
         except json.JSONDecodeError:
             pass
 
@@ -372,6 +426,108 @@ def _minio_access() -> str:
 
 def _minio_secret() -> str:
     return _read_cluster_env_value("MINIO_SECRET_KEY", "")
+
+
+# ── self-failover helpers (for remove-node-of-leader) ──────────────────
+
+
+async def _wait_new_leader(
+    etcd: Any, exclude_ip: str, timeout_s: float
+) -> str | None:
+    """Poll /cluster/leader until a leader OTHER THAN `exclude_ip` is set.
+
+    Returns the new leader's IP, or None on timeout. `exclude_ip` is
+    the peer we just stepped down (the remove-node target) — we want
+    to wait until a different peer takes over before forwarding the
+    job, otherwise we'd just bounce right back to the same daemon.
+    """
+    import json as _json
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    while asyncio.get_event_loop().time() < deadline:
+        raw = await etcd.get("/cluster/leader")
+        if raw:
+            try:
+                info = _json.loads(raw)
+                ip = info.get("ip", "")
+                if ip and ip != exclude_ip:
+                    return ip
+            except _json.JSONDecodeError:
+                pass
+        await asyncio.sleep(1)
+    return None
+
+
+async def _forward_remove_node(
+    leader_ip: str,
+    target_ip: str,
+    cluster_token: str,
+    listen_port: int,
+) -> str:
+    """POST a fresh remove-node job at the new leader; return its job-id.
+
+    Marks `_failover_attempted=True` in params so the new leader's
+    worker won't try its own self-failover dance if (somehow) the
+    target is still its leader.
+    """
+    import httpx
+    body = {
+        "type": "remove-node",
+        "params": {
+            "ip": target_ip,
+            "_failover_attempted": True,
+        },
+    }
+    url = f"http://{leader_ip}:{listen_port}/jobs"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {cluster_token}"},
+            json=body,
+        )
+        resp.raise_for_status()
+        return resp.json()["id"]
+
+
+async def _wait_forwarded_job(
+    leader_ip: str,
+    job_id: str,
+    cluster_token: str,
+    listen_port: int,
+    log_writer: Any,
+    timeout_s: float = 60 * 60,
+) -> None:
+    """Poll the new leader for the forwarded job until done; raise on
+    failure so the original CLI sees the same error context."""
+    import httpx
+    url = f"http://{leader_ip}:{listen_port}/jobs/{job_id}"
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    last_log_len = 0
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while asyncio.get_event_loop().time() < deadline:
+            resp = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {cluster_token}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            log_lines = data.get("log_lines") or []
+            if len(log_lines) > last_log_len:
+                for line in log_lines[last_log_len:]:
+                    log_writer(f"[forwarded] {line.rstrip()}")
+                last_log_len = len(log_lines)
+            state = data.get("state")
+            if state == "done":
+                return
+            if state in ("failed", "cancelled"):
+                err = data.get("error") or "(no error message)"
+                raise RuntimeError(
+                    f"forwarded remove-node job on {leader_ip} {state}: {err}"
+                )
+            await asyncio.sleep(2)
+    raise RuntimeError(
+        f"forwarded remove-node job on {leader_ip} did not finish "
+        f"within {timeout_s}s"
+    )
 
 
 register_handler("remove-node", run_remove_node)

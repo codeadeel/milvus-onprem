@@ -47,6 +47,10 @@ class LeaderElector:
         self.lease_id: int | None = None
         self.term_started_at: float | None = None
         self._stop = asyncio.Event()
+        # When > now(), the next election cycle skips racing and just
+        # watches for someone else to become leader. Set by step_down()
+        # so a voluntary failover doesn't immediately re-elect this peer.
+        self._skip_race_until: float = 0.0
 
     async def stop(self) -> None:
         """Signal the run loop to exit and revoke our lease so the next
@@ -58,6 +62,35 @@ class LeaderElector:
                 log.info("revoked lease %d on shutdown", self.lease_id)
             except Exception as e:
                 log.warning("lease_revoke failed on shutdown: %s", e)
+
+    async def step_down(self, cooldown_s: float = 15.0) -> bool:
+        """Voluntarily release leadership.
+
+        Revokes our lease so /cluster/leader is deleted (other peers'
+        watchers fire and a new election runs). Sets a short cooldown
+        during which THIS daemon abstains from racing — without it,
+        we'd often immediately reclaim leadership and the failover
+        would be a no-op. Returns True if we were the leader and
+        successfully stepped down, False otherwise (already a
+        follower, or revoke failed).
+        """
+        if not self.is_leader or self.lease_id is None:
+            return False
+        old_lease = self.lease_id
+        try:
+            await self._etcd.lease_revoke(old_lease)
+        except Exception as e:
+            log.warning("step_down: lease_revoke failed: %s", e)
+            return False
+        self._skip_race_until = time.time() + cooldown_s
+        # Don't reset is_leader here — _hold_leadership's keepalive
+        # loop will notice the lease is gone and exit, taking us back
+        # through _cycle() which sees the cooldown and just watches.
+        log.info(
+            "step_down: revoked lease %d; abstaining from race for %.1fs",
+            old_lease, cooldown_s,
+        )
+        return True
 
     async def run(self) -> None:
         """Run the elect-or-follow loop until stop() is called.
@@ -82,6 +115,17 @@ class LeaderElector:
 
     async def _cycle(self) -> None:
         """One round: grant a lease, race for the leader key, hold or watch."""
+        # Voluntary-failover cooldown: just watch this round so a peer
+        # we just stepped down for has time to win the next term.
+        if time.time() < self._skip_race_until:
+            self.is_leader = False
+            log.info(
+                "step_down cooldown active for %.1fs; watching for next leader",
+                self._skip_race_until - time.time(),
+            )
+            await self._await_leader_change()
+            return
+
         self.lease_id = await self._etcd.lease_grant(self._cfg.lease_ttl_s)
         my_value = json.dumps(
             {
