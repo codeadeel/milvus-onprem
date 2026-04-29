@@ -88,16 +88,35 @@ minio_bucket_exists() {
   minio_mc ls "local/${b}/" >/dev/null 2>&1
 }
 
-# Create the bucket if it doesn't exist. Idempotent — safe to call repeatedly.
+# Create the bucket if it doesn't exist. Idempotent — safe to call
+# repeatedly.
+#
+# Retries through transient docker-exec failures: when a peer joins a
+# distributed pool, MinIO containers across all peers restart for the
+# ring re-stripe. A bootstrap running on a peer that joined just before
+# can race the restart and see "container not running" from
+# `docker exec milvus-minio`. We retry with a short backoff so the
+# bootstrap doesn't fail spuriously on a join during pool-grow.
+#
 # Usage: minio_bucket_ensure <bucket-name>
 minio_bucket_ensure() {
   local b="$1"
-  if minio_bucket_exists "$b"; then
-    info "minio: bucket '$b' already exists"
-    return 0
-  fi
-  info "minio: creating bucket '$b'"
-  minio_mc mb "local/${b}"
+  local attempt
+  for attempt in 1 2 3 4 5 6; do
+    if minio_bucket_exists "$b"; then
+      info "minio: bucket '$b' already exists"
+      return 0
+    fi
+    info "minio: creating bucket '$b' (attempt $attempt)"
+    if minio_mc mb "local/${b}" 2>/dev/null; then
+      return 0
+    fi
+    if (( attempt < 6 )); then
+      sleep 5
+    fi
+  done
+  die "minio: bucket '$b' could not be created after retries — \
+check 'docker logs milvus-minio' on this peer"
 }
 
 # Convenience: create the bucket Milvus expects (bucketName in milvus.yaml).

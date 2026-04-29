@@ -99,6 +99,15 @@ async def _do_join(
 ) -> JoinResult:
     """The serialised happy-path. Each step writes etcd state forward
     so a leader-failover mid-join can pick up where we left off."""
+    # Wait for the cluster to be fully healthy before adding another
+    # member. After a previous member-add, etcd has the new peer in its
+    # membership as `unstarted` until that peer's etcd container comes
+    # online; etcd's strict-reconfig-check refuses concurrent member-add
+    # in that window (returns 500 ErrUnhealthy or 503). The wait here
+    # means parallel `./milvus-onprem join` runs are serialised by
+    # joiner-bootstrap-time but all succeed.
+    await _wait_cluster_healthy(etcd, timeout_s=180)
+
     existing = await etcd.get_prefix(TOPOLOGY_PREFIX)
     parsed: dict[str, dict[str, Any]] = {}
     for k, v in existing.items():
@@ -207,6 +216,43 @@ async def _do_join(
 
 
 # ── helpers ──────────────────────────────────────────────────────────
+
+
+async def _wait_cluster_healthy(etcd: EtcdClient, timeout_s: int) -> None:
+    """Block until every configured etcd member is started.
+
+    A member is `started` once its etcd has connected to the cluster;
+    etcd reports this by setting `name` on the member entry (it stays
+    empty for `unstarted` members). Polling member_list (a local read
+    that doesn't need quorum) is the cheapest healthy-cluster probe.
+
+    Raises JoinError on timeout — the operator should `remove-node`
+    the failed peer before retrying join.
+    """
+    deadline = time.monotonic() + timeout_s
+    last_log = 0.0
+    while time.monotonic() < deadline:
+        try:
+            members = await etcd.member_list()
+            unstarted = [m for m in members if not m.get("name")]
+            if not unstarted:
+                return
+            now = time.monotonic()
+            if now - last_log > 5:
+                peers = [m.get("peerURLs", ["?"])[0] for m in unstarted]
+                log.info(
+                    "waiting for %d etcd member(s) to come online: %s",
+                    len(unstarted), peers,
+                )
+                last_log = now
+        except Exception as e:
+            log.debug("member_list during cluster-healthy wait: %s", e)
+        await asyncio.sleep(2)
+    raise JoinError(
+        f"cluster did not become healthy within {timeout_s}s; "
+        "an earlier joiner's etcd may have failed to start — "
+        "run remove-node on that peer before retrying"
+    )
 
 
 def _is_valid_ipv4(ip: str) -> bool:

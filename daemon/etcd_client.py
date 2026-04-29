@@ -78,24 +78,51 @@ class EtcdClient:
         ep = self._endpoints[self._idx % len(self._endpoints)]
         return f"{ep.rstrip('/')}{path}"
 
-    async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        """POST JSON to etcd, failing over to the next endpoint on error.
+    # Retry schedule for transient etcd failures (503, conn drop, timeout).
+    # These appear during raft conf-change propagation (right after a
+    # member-add or member-remove) and during transient quorum loss when a
+    # new member is being added but its etcd hasn't connected yet. Total
+    # ~31s of backoff covers a typical joiner-bootstrap window.
+    _RETRY_DELAYS_S = (1, 2, 4, 8, 8, 8)
 
-        Tries each endpoint in turn (one round) and raises if all fail.
-        Bumps the round-robin index on failure so subsequent calls
-        prefer the still-healthy endpoint.
+    async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST JSON to etcd with retry-on-transient and endpoint failover.
+
+        Retries transient signals — 503, connection drop, read timeout —
+        with exponential backoff (~31s total). Other 4xx/5xx surface
+        immediately. Endpoint failover happens on connection-level errors
+        (one etcd dropped) and on 503 (try a peer that may not be busy).
+
+        Why retry: etcd's HTTP gateway returns 503 / closes connections
+        during raft conf-change windows (member-add, member-remove). All
+        our writes go through this gateway, so any caller may hit the
+        window. 503 means "the request didn't reach raft" — retry is
+        always safe. For PUTs that DID reach raft and succeeded, the
+        retry sees the prior write and returns the same effective state
+        (idempotent for `put`, observed-as-False for `put_if_absent`).
         """
         last_err: Exception | None = None
-        for _ in range(len(self._endpoints)):
-            url = self._url(path)
+        for delay in (0, *self._RETRY_DELAYS_S):
+            if delay:
+                await asyncio.sleep(delay)
             try:
-                r = await self._http.post(url, json=body)
-                r.raise_for_status()
-                return r.json()
+                r = await self._http.post(self._url(path), json=body)
             except (httpx.HTTPError, httpx.TimeoutException) as e:
                 last_err = e
                 self._idx += 1
-        raise RuntimeError(f"etcd: all endpoints failed: {last_err}")
+                continue
+            if r.status_code == 503:
+                last_err = RuntimeError(f"etcd 503: {r.text[:200]}")
+                self._idx += 1
+                continue
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError:
+                raise
+            return r.json()
+        raise RuntimeError(
+            f"etcd: all endpoints failed after retries: {last_err}"
+        )
 
     # ── leases ───────────────────────────────────────────────────────
 
@@ -133,7 +160,10 @@ class EtcdClient:
             joiner to compute its --initial-cluster argument
 
         The new member is `unstarted` until its etcd process starts
-        with `--initial-cluster-state=existing` and connects.
+        with `--initial-cluster-state=existing` and connects. While a
+        prior member-add's raft conf-change is propagating, etcd
+        returns 503 to a second member-add — `_post` retries through
+        that window automatically.
         """
         return await self._post(
             "/v3/cluster/member/add",
