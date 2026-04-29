@@ -53,6 +53,7 @@ _join_lock = asyncio.Lock()
 # brittle to depend on).
 _PER_PEER_KEYS = frozenset({
     "PEER_IPS",
+    "PEER_NAMES",
     "NODE_NAME",
     "LOCAL_IP",
     "ETCD_INITIAL_CLUSTER_STATE",
@@ -132,7 +133,7 @@ async def _do_join(
                 "returning fresh cluster_env without re-adding to etcd",
                 joiner_ip, name,
             )
-            existing_peer_ips = _ordered_peer_ips_after_join(
+            existing_pairs = _ordered_peer_names_and_ips_after_join(
                 {k: v for k, v in parsed.items() if k != name},
                 name,
                 joiner_ip,
@@ -141,7 +142,8 @@ async def _do_join(
                 leader_env=_read_cluster_env(),
                 node_name=name,
                 local_ip=joiner_ip,
-                all_peer_ips=existing_peer_ips,
+                all_peer_ips=[ip for _n, ip in existing_pairs],
+                all_peer_names=[n for n, _ip in existing_pairs],
             )
             return JoinResult(
                 node_name=name,
@@ -180,12 +182,15 @@ async def _do_join(
     # 2. Compute the post-add peer list locally so we can build the
     # joiner's cluster.env without needing another etcd call after
     # member-add. We know exactly what the membership will look like.
-    all_peer_ips = _ordered_peer_ips_after_join(parsed, new_name, joiner_ip)
+    all_pairs = _ordered_peer_names_and_ips_after_join(
+        parsed, new_name, joiner_ip
+    )
     cluster_env_text = _build_joiner_cluster_env(
         leader_env=_read_cluster_env(),
         node_name=new_name,
         local_ip=joiner_ip,
-        all_peer_ips=all_peer_ips,
+        all_peer_ips=[ip for _n, ip in all_pairs],
+        all_peer_names=[n for n, _ip in all_pairs],
     )
 
     # 3. etcd member-add. Quorum drops here on a 1->2 grow until the
@@ -318,6 +323,22 @@ def _ordered_peer_ips_after_join(
     etcd-quorum window). The topology mirror plus the just-allocated
     name + joiner IP is enough to know the final ordering.
     """
+    return [ip for _name, ip in _ordered_peer_names_and_ips_after_join(
+        existing_topology, new_name, joiner_ip
+    )]
+
+
+def _ordered_peer_names_and_ips_after_join(
+    existing_topology: dict[str, dict[str, Any]],
+    new_name: str,
+    joiner_ip: str,
+) -> list[tuple[str, str]]:
+    """Same idea as _ordered_peer_ips_after_join but keeps NAMES too.
+
+    cluster.env stores PEER_IPS and PEER_NAMES as parallel comma-
+    separated lists. Returning them already paired and ordered keeps
+    callers from accidentally desynchronising the two arrays.
+    """
     combined: dict[str, str] = {}
     for name, info in existing_topology.items():
         ip = info.get("ip", "")
@@ -325,7 +346,10 @@ def _ordered_peer_ips_after_join(
             combined[name] = ip
     combined[new_name] = joiner_ip
 
-    return [combined[name] for name in sorted(combined, key=_node_sort_key)]
+    return [
+        (name, combined[name])
+        for name in sorted(combined, key=_node_sort_key)
+    ]
 
 
 def _node_sort_key(name: str) -> tuple[int, str]:
@@ -339,6 +363,7 @@ def _build_joiner_cluster_env(
     node_name: str,
     local_ip: str,
     all_peer_ips: list[str],
+    all_peer_names: list[str],
 ) -> str:
     """Render the joiner's cluster.env file content.
 
@@ -347,6 +372,12 @@ def _build_joiner_cluster_env(
     so the joiner's etcd joins the running Raft instead of trying to
     bootstrap a fresh cluster.
     """
+    if len(all_peer_names) != len(all_peer_ips):
+        raise JoinError(
+            f"internal: PEER_NAMES ({len(all_peer_names)}) and PEER_IPS "
+            f"({len(all_peer_ips)}) length mismatch when building joiner "
+            f"cluster.env"
+        )
     lines: list[str] = []
     lines.append("# =============================================================================")
     lines.append("# milvus-onprem cluster.env (joiner copy)")
@@ -356,6 +387,7 @@ def _build_joiner_cluster_env(
     lines.append(f"NODE_NAME={node_name}")
     lines.append(f"LOCAL_IP={local_ip}")
     lines.append(f"PEER_IPS={','.join(all_peer_ips)}")
+    lines.append(f"PEER_NAMES={','.join(all_peer_names)}")
     lines.append("ETCD_INITIAL_CLUSTER_STATE=existing")
     lines.append("")
 

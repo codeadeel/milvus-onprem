@@ -124,13 +124,15 @@ class TopologyHandlers:
     # ── primitive operations ─────────────────────────────────────────
 
     async def _sync_cluster_env_and_render(self) -> bool:
-        """Rebuild cluster.env's PEER_IPS list from etcd, then render.
+        """Rebuild cluster.env's PEER_IPS / PEER_NAMES from etcd, then render.
 
-        Reads the current PEER_IPS from cluster.env (mounted read-only —
-        we have to use a write workflow), updates if topology disagrees,
-        and re-runs render. The render step is the existing bash code,
-        invoked via subprocess; it picks up the new PEER_IPS and
-        regenerates rendered/<this-node>/*.
+        PEER_IPS and PEER_NAMES are kept in lockstep, sorted by node-N
+        suffix. PEER_NAMES is the stable etcd-side identity for each
+        peer; without it, role_detect would synthesise names by position
+        and break post-remove-node when a low-N peer is removed — the
+        survivors' etcd identities don't get re-numbered, but a
+        position-based scheme would silently relabel them, leading to
+        rendered/<wrong-name>/ on the survivors.
 
         Returns True on success (or trivially on empty topology), False
         if render failed. Caller uses the return value to decide whether
@@ -138,16 +140,23 @@ class TopologyHandlers:
         run — they would otherwise propagate stale config.
         """
         cluster_env_host = os.path.join(REPO_PATH, "cluster.env")
-        topology_ips = self._current_peer_ips()
-        if not topology_ips:
+        ordered = self._current_peer_ips_and_names()
+        if not ordered:
             log.info("render: topology empty, skipping")
             return True
 
-        new_peer_ips = ",".join(topology_ips)
+        new_peer_ips = ",".join(ip for _name, ip in ordered)
+        new_peer_names = ",".join(name for name, _ip in ordered)
         await asyncio.to_thread(
             _upsert_kv, cluster_env_host, "PEER_IPS", new_peer_ips
         )
-        log.info("cluster.env PEER_IPS=%s", new_peer_ips)
+        await asyncio.to_thread(
+            _upsert_kv, cluster_env_host, "PEER_NAMES", new_peer_names
+        )
+        log.info(
+            "cluster.env PEER_IPS=%s PEER_NAMES=%s",
+            new_peer_ips, new_peer_names,
+        )
 
         rc, out, err = await _run(
             f"cd {shlex.quote(REPO_PATH)} && ./milvus-onprem render"
@@ -335,6 +344,21 @@ class TopologyHandlers:
         peers = self._topology.peers
         return [
             peers[name].get("ip", "")
+            for name in sorted(peers, key=_node_sort_key)
+            if peers[name].get("ip")
+        ]
+
+    def _current_peer_ips_and_names(self) -> list[tuple[str, str]]:
+        """Return [(name, ip), ...] from the topology mirror, sorted by
+        node-N suffix. Both arrays kept in lockstep when written to
+        cluster.env so role_detect can map this peer's NODE_NAME to its
+        position without losing identity across remove-node operations.
+        """
+        from .joining import _node_sort_key
+
+        peers = self._topology.peers
+        return [
+            (name, peers[name].get("ip", ""))
             for name in sorted(peers, key=_node_sort_key)
             if peers[name].get("ip")
         ]
