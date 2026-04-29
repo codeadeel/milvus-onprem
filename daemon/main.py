@@ -142,6 +142,38 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 log.warning("jobs prune tick errored: %s", e)
 
+    async def _stuck_sweep_loop() -> None:
+        """Periodically mark stuck-running jobs as failed.
+
+        QA finding F5.2: when the daemon that owns a running job dies,
+        the worker task dies with it; without this sweep, the job sits
+        in `running` state forever. The sweep checks `last_heartbeat`
+        on every running job and marks them `failed` after the
+        configured timeout (default 60s = 30 flush cycles missed).
+        Leader-only; followers tick but no-op.
+        """
+        log.info(
+            "jobs stuck-running sweep: interval=%ds heartbeat_timeout=%ds (leader-only)",
+            config.jobs_stuck_sweep_interval_s, config.jobs_heartbeat_timeout_s,
+        )
+        while not stop_pruner.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop_pruner.wait(),
+                    timeout=config.jobs_stuck_sweep_interval_s,
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+            if not elector.is_leader:
+                continue
+            try:
+                await jobs_mgr.prune_stuck_running(
+                    config.jobs_heartbeat_timeout_s
+                )
+            except Exception as e:
+                log.warning("stuck-running sweep tick errored: %s", e)
+
     # Stash on app.state so route handlers can read them.
     app.state.config = config
     app.state.etcd = etcd
@@ -171,6 +203,9 @@ async def lifespan(app: FastAPI):
     retention_task = asyncio.create_task(
         _retention_loop(), name="jobs-retention"
     )
+    stuck_sweep_task = asyncio.create_task(
+        _stuck_sweep_loop(), name="jobs-stuck-sweep"
+    )
 
     background_tasks = (
         elector_task,
@@ -178,6 +213,7 @@ async def lifespan(app: FastAPI):
         local_watchdog_task,
         peer_watchdog_task,
         retention_task,
+        stuck_sweep_task,
     )
 
     try:

@@ -122,6 +122,19 @@ _env_apply_defaults() {
   : "${WATCHDOG_RESTART_LOOP_WINDOW_S:=300}"
   : "${WATCHDOG_RESTART_LOOP_MAX:=3}"
 
+  # nginx upstream tunings — exposed so operators on flaky LANs / WAN
+  # can lift them without editing the template. Defaults are the
+  # values we shipped originally (max_fails=3, fail_timeout=30s).
+  : "${NGINX_UPSTREAM_MAX_FAILS:=3}"
+  : "${NGINX_UPSTREAM_FAIL_TIMEOUT_S:=30}"
+
+  # Rolling MinIO recreate (handlers._rolling_minio_recreate):
+  # per-peer RPC timeout (seconds), and per-container healthy-wait
+  # ceiling. Defaults match the original code; tighten if your
+  # MinIO comes back faster, lift on slow disks.
+  : "${ROLLING_MINIO_PEER_RPC_TIMEOUT_S:=180}"
+  : "${ROLLING_MINIO_HEALTHY_WAIT_S:=90}"
+
   : "${PAIR_PORT:=19500}"
 
   # Singleton Pulsar host (only used for MQ_TYPE=pulsar deploys, e.g. 2.5).

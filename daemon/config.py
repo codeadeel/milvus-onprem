@@ -82,6 +82,39 @@ class DaemonConfig(BaseSettings):
         default=3600,
         description="Seconds between leader-side retention sweeps. Default 1h.",
     )
+    jobs_heartbeat_timeout_s: int = Field(
+        default=60,
+        description=(
+            "If a `running` job's owner heartbeat is older than this, the "
+            "leader's stuck-job sweep marks it `failed`. Heartbeats are "
+            "written every ~2s by the owner's periodic flusher; default "
+            "60s = ~30 flush cycles missed. Lift if your jobs hold the "
+            "GIL through long blocking calls."
+        ),
+    )
+    jobs_stuck_sweep_interval_s: int = Field(
+        default=30,
+        description=(
+            "Seconds between leader-side stuck-running sweeps. Faster than "
+            "the retention sweep so a stuck job becomes visible to the "
+            "operator within ~1 sweep + heartbeat_timeout."
+        ),
+    )
+
+    rolling_minio_peer_rpc_timeout_s: float = Field(
+        default=180.0,
+        description=(
+            "Per-peer RPC timeout for /recreate-minio-self during a "
+            "leader-driven rolling MinIO sweep. Lift on slow disks."
+        ),
+    )
+    rolling_minio_healthy_wait_s: int = Field(
+        default=90,
+        description=(
+            "Maximum seconds to wait for a recreated MinIO container "
+            "to report healthy before the rolling sweep moves on."
+        ),
+    )
 
     @property
     def etcd_endpoint_list(self) -> list[str]:

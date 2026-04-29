@@ -89,6 +89,79 @@ behavior, concurrent backup + remove-node, upgrade-mid-failure.
 |---|---|---|
 | F-R3-B.1 loop-guard not actually halting | `daemon/watchdog.py` — once `_loop_alerted.add(name)` runs, `_maybe_restart` returns immediately without re-checking the sliding window. Flag is cleared only when the container observes `health=healthy` in `_tick`, giving the operator a clean re-arm path: fix the underlying issue, run `docker restart <name>`, watchdog sees healthy → flag clears → auto-restart re-armed for any future re-trip. | Re-drilled with the fix; only ONE LOOP fires per container per "incident", restarts genuinely halt until operator-triggered recovery. |
 
+## Round 4 — production-readiness pass
+
+Targeted at the user's selected list: concurrent SDK, daemon restart
+during job, upgrade-mid-failure, air-gapped registry, token rotation,
+multi-version coexistence, backup-format compat, F5.2 follow-up,
+watchdog peer-failure threshold tuning. Plus a hard-coded-values audit
+("nothing should be hard-coded; production-ready dynamic config").
+
+### Audit: hard-coded values
+
+Scanned `lib/`, `daemon/`, `templates/` for hard-coded ports / paths /
+magic numbers. Findings:
+
+- **Most code is already env-driven** via `env.sh`'s `:=` defaults and
+  `daemon/config.py`'s pydantic `Field(default=…)`. Operator overrides
+  via `cluster.env` flow through `lib/render.sh`'s envsubst list and
+  the templates' `${VAR}` references.
+- `127.0.0.1` literals in `lib/cmd_*.sh` and `lib/etcd.sh` /
+  `lib/minio.sh`: these are loopback (talking to the local container's
+  bound port), not "this host's IP" — intentional, must remain literal.
+- `/etcd-data/` in `lib/etcd.sh` snapshot path: required by the etcd
+  image's volume mount convention. Hard-coded but unavoidable.
+- `/tmp/onprem-{import,export}-…` in restore + export backup: inside
+  the milvus-minio container's filesystem, also bind-mounted to host.
+  Convention-driven hard code; fine.
+
+**Real cleanup targets (fixed in this round):**
+
+- nginx upstream `max_fails=3 fail_timeout=30s` was hard-coded in
+  `lib/render.sh`. Now configurable via `NGINX_UPSTREAM_MAX_FAILS` and
+  `NGINX_UPSTREAM_FAIL_TIMEOUT_S` (defaults match prior values).
+- `httpx.AsyncClient(timeout=180.0)` in `daemon/handlers.py` for the
+  rolling MinIO recreate RPC was hard-coded. Now
+  `MILVUS_ONPREM_ROLLING_MINIO_PEER_RPC_TIMEOUT_S`.
+- `_wait_minio_healthy(timeout_s=90)` in handlers was hard-coded. Now
+  `MILVUS_ONPREM_ROLLING_MINIO_HEALTHY_WAIT_S`.
+
+All passthrough wired: `lib/env.sh` → `lib/render.sh` substitution
+list → `templates/{2.5,2.6}/_daemon-service.yml.tpl` env block.
+
+### What works (R4 validations)
+
+| Cat | Result |
+|---|---|
+| **R4-A** Concurrent SDK clients | 8 threads (4 readers + 4 writers) doing 240 ops in 0.5s, 0 errors, exact final row count (5000 = 1000 seed + 4×10×100). |
+| **R4-B** Token rotation | Per-peer: edit `CLUSTER_TOKEN` in cluster.env, render, recreate daemon. m1 immediately accepts NEW + rejects OLD; m2/m3 still on OLD until their cluster.env updates. After rotating all 3, all 3 accept NEW. **Caveat**: cross-peer RPCs (rolling MinIO, /upgrade-self, watchdog peer probes from ANY peer) break during the rotation window — operators must rotate in fast succession or during a maintenance window. |
+| **R4-D** Watchdog threshold tuning | `WATCHDOG_PEER_FAILURE_THRESHOLD=1`: peer-down alert in 10s (vs 60s with default 6). Mechanical, behaves linearly with threshold × interval. |
+| **R4-E** F5.2 heartbeat-lease (implemented + drilled) | Stuck-running jobs after leader death were the F5.2 limitation. Implemented per-job heartbeat: `Job.last_heartbeat` updated by the owner's periodic flusher every 2s; new `JobsManager.prune_stuck_running()` runs on the leader every 30s and marks running jobs `failed` if heartbeat is older than `jobs_heartbeat_timeout_s` (default 60s). **Drilled live**: submit a create-backup → kill leader's daemon mid-job → 81 seconds later, new leader's sweep marked the job `failed` with `error="owner died (heartbeat age=71s; timeout=60s) — job presumed stuck after daemon loss"`. Previously the job stayed `running` forever. |
+| **R4-I** Air-gapped registry overrides | Set `MILVUS_IMAGE_REPO=internal-registry.example.com/milvus` (and 4 sibling overrides) in cluster.env → `./milvus-onprem render` → all milvus-* / etcd / minio / nginx / pulsar service blocks now reference the private registry. Render-level confirmed. (Live deploy against a real registry requires actual mirror setup — out of scope for this drill.) |
+
+### New findings — Round 4
+
+| ID | Severity | Symptom |
+|---|---|---|
+| F-R4-C.1 | **wart** | Multi-version coexistence: there's no guard preventing an operator from manually editing cluster.env on one peer to a different `MILVUS_IMAGE_TAG` than the rest of the cluster. `./milvus-onprem render` happily generates a 2.6-shaped compose for a peer in a 2.5 cluster (or vice versa). The cluster would then fail at runtime in confusing ways (etcd metadata schemas don't cross-match). The cross-major upgrade path (`./milvus-onprem upgrade`) refuses correctly, but ad-hoc cluster.env edits aren't validated against the cluster-wide consensus. Future fix: leader writes the cluster's canonical `MILVUS_IMAGE_TAG` to etcd `/cluster/version`; render checks it agrees. |
+| F-R4-B.1 | **operator-care** | Token rotation works per-peer but not cluster-atomically. During the window where some peers have NEW token and others OLD, daemon-to-daemon RPCs (rolling MinIO sweep, /upgrade-self, /recreate-minio-self) fail with 403. Operator must rotate all peers in fast succession (≤ ~30s recommended) or during a quiet window. |
+
+### Round 4 fixes shipped
+
+| Finding | Fix |
+|---|---|
+| F5.2 (from R1, deferred to R4) — stuck-running jobs after leader death | Heartbeat per Job; leader-side stuck-sweep marks failed after timeout. New env vars `MILVUS_ONPREM_JOBS_HEARTBEAT_TIMEOUT_S` (60s) and `MILVUS_ONPREM_JOBS_STUCK_SWEEP_INTERVAL_S` (30s). |
+| Hard-coded nginx upstream params | `NGINX_UPSTREAM_MAX_FAILS` / `NGINX_UPSTREAM_FAIL_TIMEOUT_S` env vars. |
+| Hard-coded rolling MinIO timeouts in handlers.py | `MILVUS_ONPREM_ROLLING_MINIO_PEER_RPC_TIMEOUT_S` / `MILVUS_ONPREM_ROLLING_MINIO_HEALTHY_WAIT_S`. |
+
+### R4 deferred (not drilled this round)
+
+| Cat | Why |
+|---|---|
+| R4-F daemon-restart-during-peer-side-job | Pulsar-kill drill was a no-op (only PULSAR_HOST has pulsar; leader was a non-pulsar peer). The F5.2 drill exercises the related "owner dies mid-job" path; this would just be the symmetric "remote peer dies during a /upgrade-self RPC". Logic-level review confirms the leader's RPC raises on connection drop. |
+| R4-G upgrade fault injection | Same-version upgrade is too fast on small data; the natural fault windows close before the kill lands. Real drill needs deliberate HTTP-layer fault injection (e.g. iptables drop on /upgrade-self responses, or a debug flag in the worker). |
+| R4-H backup format compat across milvus-backup binary versions | Need multiple binary versions in cache; only `v0.5.14` is downloaded. Operator can supply `--milvus-backup-version=` on `create-backup`/`restore-backup`; the version pinning works (already env-driven via `MILVUS_BACKUP_VERSION`). Cross-version-binary compat is upstream-binary-vendor concern; out of scope. |
+
 ## Known limitations (not fixed in this pass)
 
 | ID | What it is | Why deferred |

@@ -190,7 +190,7 @@ class TopologyHandlers:
                         rc, err.strip()[:400])
             return
         log.info("minio recreated; waiting for healthy")
-        await _wait_minio_healthy(timeout_s=90)
+        await _wait_minio_healthy(timeout_s=self._cfg.rolling_minio_healthy_wait_s)
 
     async def _rolling_minio_recreate(
         self,
@@ -246,7 +246,9 @@ class TopologyHandlers:
             url = f"http://{ip}:{self._cfg.listen_port}/recreate-minio-self"
             log.info("rolling MinIO recreate: -> %s @ %s", name, ip)
             try:
-                async with httpx.AsyncClient(timeout=180.0) as client:
+                async with httpx.AsyncClient(
+                    timeout=self._cfg.rolling_minio_peer_rpc_timeout_s
+                ) as client:
                     resp = await client.post(
                         url,
                         headers={

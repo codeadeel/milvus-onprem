@@ -67,7 +67,9 @@ _render_var_list() {
            CONTROL_PLANE_SERVICE_BLOCK \
            WATCHDOG_MODE WATCHDOG_INTERVAL_S \
            WATCHDOG_UNHEALTHY_THRESHOLD WATCHDOG_PEER_FAILURE_THRESHOLD \
-           WATCHDOG_RESTART_LOOP_WINDOW_S WATCHDOG_RESTART_LOOP_MAX; do
+           WATCHDOG_RESTART_LOOP_WINDOW_S WATCHDOG_RESTART_LOOP_MAX \
+           NGINX_UPSTREAM_MAX_FAILS NGINX_UPSTREAM_FAIL_TIMEOUT_S \
+           ROLLING_MINIO_PEER_RPC_TIMEOUT_S ROLLING_MINIO_HEALTHY_WAIT_S; do
     printf '${%s} ' "$v"
   done
 }
@@ -165,7 +167,7 @@ _render_compute_derived() {
   # requests within 30s; nginx routes around it until it recovers.
   NGINX_UPSTREAM_BLOCK=""
   for ((i=0; i<CLUSTER_SIZE; i++)); do
-    NGINX_UPSTREAM_BLOCK+="    server ${PEERS_ARR[$i]}:${MILVUS_PORT} max_fails=3 fail_timeout=30s;"$'\n'
+    NGINX_UPSTREAM_BLOCK+="    server ${PEERS_ARR[$i]}:${MILVUS_PORT} max_fails=${NGINX_UPSTREAM_MAX_FAILS} fail_timeout=${NGINX_UPSTREAM_FAIL_TIMEOUT_S}s;"$'\n'
   done
 
   # Default the etcd cluster state to "new" — `milvus-onprem rejoin` flips

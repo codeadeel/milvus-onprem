@@ -67,6 +67,16 @@ class Job:
     error: str | None
     owner: str            # node_name of the daemon executing it
     logs: list[str] = field(default_factory=list)
+    # Owner heartbeat — the executing daemon's periodic flusher updates
+    # this every 2s (see _execute.periodic_flush). The leader's stuck-
+    # running sweep (prune_stuck_running) marks jobs `failed` if their
+    # heartbeat is older than the configured timeout. Resolves QA
+    # finding F5.2: leader-death used to leave jobs in state=running
+    # forever because the worker task died with the daemon and nobody
+    # cleaned up. Now: when the new leader sees a running job whose
+    # heartbeat is stale, it transitions the job to state=failed with
+    # error="owner died (no heartbeat in Ns)".
+    last_heartbeat: float | None = None
 
     def to_json(self) -> str:
         """Compact JSON for etcd value storage."""
@@ -75,7 +85,14 @@ class Job:
     @classmethod
     def from_json(cls, s: str) -> "Job":
         """Inverse of to_json()."""
-        return cls(**json.loads(s))
+        d = json.loads(s)
+        # Defensive default for jobs serialised pre-heartbeat-field
+        # (operator running a freshly-built daemon against an existing
+        # etcd that has older job entries). They look stuck-running by
+        # default — the sweep treats `last_heartbeat=None` on an old
+        # running job as "definitely stale" and cleans it up.
+        d.setdefault("last_heartbeat", None)
+        return cls(**d)
 
 
 # Worker registration. Each job type has exactly one async handler that
@@ -239,6 +256,68 @@ class JobsManager:
             )
         return deleted
 
+    async def prune_stuck_running(self, heartbeat_timeout_s: int) -> int:
+        """Mark jobs `failed` whose owner heartbeat is older than the
+        timeout.
+
+        Resolves QA finding F5.2: when the daemon owning a running
+        job dies (kill -9, host crash, network drop) the worker task
+        dies with it, the periodic_flush stops, and the job sits in
+        state=running forever. Without this sweep, `jobs list` accumulates
+        stuck-running entries that confuse operators.
+
+        Detection: each running job's owner updates `last_heartbeat`
+        on every periodic_flush (every ~2s). A heartbeat older than
+        `heartbeat_timeout_s` (default 60s — see daemon/config.py)
+        means the owner has been silent for >30 flush cycles, almost
+        certainly dead.
+
+        Defensive default: if `last_heartbeat is None` (e.g. a job
+        from a pre-heartbeat-field daemon, or one that was created but
+        never reached the running flush loop), treat as stale —
+        clearly the owner isn't writing heartbeats.
+
+        Idempotent: a job that was already transitioned by an earlier
+        sweep (state != "running") is skipped. Safe to call from any
+        daemon, but caller is expected to gate on leader status.
+
+        Returns number of jobs marked failed.
+        """
+        cutoff = time.time() - heartbeat_timeout_s
+        marked = 0
+        for job in await self.list_jobs():
+            if job.state != "running":
+                continue
+            stale = (
+                job.last_heartbeat is None
+                or job.last_heartbeat < cutoff
+            )
+            if not stale:
+                continue
+            age = (
+                "never" if job.last_heartbeat is None
+                else f"{int(time.time() - job.last_heartbeat)}s"
+            )
+            job.state = "failed"
+            job.finished_at = time.time()
+            job.error = (
+                f"owner died (heartbeat age={age}; "
+                f"timeout={heartbeat_timeout_s}s) — "
+                f"job presumed stuck after daemon loss"
+            )
+            try:
+                await self._etcd.put(self._key(job.id), job.to_json())
+                log.warning(
+                    "marked stuck job %s (type=%s, owner=%s) as failed: %s",
+                    job.id, job.type, job.owner, job.error,
+                )
+                marked += 1
+            except Exception as e:
+                log.warning(
+                    "failed to mark stuck job %s as failed: %s", job.id, e,
+                )
+        return marked
+
     async def _execute(self, job: Job) -> None:
         """Wrap the worker fn with state transitions + periodic flushes.
 
@@ -264,6 +343,12 @@ class JobsManager:
             try:
                 while True:
                     await asyncio.sleep(2)
+                    # Update heartbeat before each flush so the leader's
+                    # stuck-running sweep can tell this job's owner is
+                    # still alive. If the owner's daemon dies, the
+                    # heartbeat stops advancing and the sweep will mark
+                    # the job failed after `jobs_heartbeat_timeout_s`.
+                    job.last_heartbeat = time.time()
                     try:
                         await self._etcd.put(self._key(job.id), job.to_json())
                     except Exception as e:
@@ -272,6 +357,7 @@ class JobsManager:
                 pass
 
         job.state = "running"
+        job.last_heartbeat = time.time()
         await self._etcd.put(self._key(job.id), job.to_json())
 
         flusher = asyncio.create_task(periodic_flush(), name=f"flush-{job.id}")
