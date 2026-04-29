@@ -129,8 +129,20 @@ cmd_bootstrap() {
   fi
 
   # --- Stage 7: create the bucket Milvus expects ------------------------
+  # On a JOINER in distributed mode, the bucket was already created by
+  # the leader at init time; the leader's MinIO pool replicates to
+  # every peer so the bucket is visible cluster-wide. Trying to create
+  # it here is racy — a joiner's local MinIO can be in a transient
+  # "Expected N endpoints, seen M" state during the leader's rolling
+  # recreate (which only finishes AFTER the joiner's bootstrap has
+  # already moved past this stage), and `mc` commands against a
+  # not-yet-quorate local MinIO time out / fail. Skip the ensure on
+  # joiners; only the very first peer (init) creates the bucket.
   info "==> Stage 7/7: ensure milvus-bucket exists in MinIO"
-  if minio_local_healthy; then
+  if [[ "${MODE:-standalone}" == "distributed" \
+        && "${ETCD_INITIAL_CLUSTER_STATE:-new}" == "existing" ]]; then
+    info "(joiner: bucket already exists in cluster MinIO from init; skipping)"
+  elif minio_local_healthy; then
     minio_create_milvus_bucket
   else
     warn "local MinIO not healthy yet — bucket creation skipped; re-run bootstrap once cluster forms"
