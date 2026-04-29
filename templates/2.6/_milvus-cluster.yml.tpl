@@ -98,27 +98,13 @@
       retries: 3
       start_period: ${MILVUS_HEALTHCHECK_START_PERIOD_S}s
 
-  # indexnode — index-build worker.
-  indexnode:
-    image: ${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}
-    container_name: milvus-indexnode
-    network_mode: host
-    restart: always
-    command: ["milvus", "run", "indexnode"]
-    volumes:
-      - ${DATA_ROOT}/milvus:/var/lib/milvus
-      - ${HOST_REPO_ROOT}/rendered/${NODE_NAME}/milvus.yaml:/milvus/configs/user.yaml:ro
-    depends_on:
-      - mixcoord
-    healthcheck:
-      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/${MILVUS_INDEXNODE_PORT}"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: ${MILVUS_HEALTHCHECK_START_PERIOD_S}s
-
   # streamingnode — Woodpecker WAL handler. Replaces the role Pulsar /
   # Kafka played in 2.5. New in 2.6 — every peer runs one.
+  #
+  # Note: index-build is handled by datanode in 2.6 (the separate
+  # `indexnode` server type was deprecated). The CLI's help text
+  # still lists indexnode but `milvus run indexnode` errors with
+  # "Unknown server type"; we don't ship it as a service.
   streamingnode:
     image: ${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}
     container_name: milvus-streamingnode

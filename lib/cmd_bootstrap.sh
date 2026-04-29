@@ -94,7 +94,9 @@ cmd_bootstrap() {
   if [[ "$MILVUS_VERSION" == "2.5" ]]; then
     dc up -d mixcoord proxy querynode datanode indexnode
   elif [[ "${MODE:-standalone}" == "distributed" ]]; then
-    dc up -d mixcoord proxy querynode datanode indexnode streamingnode
+    # 2.6 dropped the separate indexnode server type — index-build runs
+    # inside datanode now. cluster mode = mixcoord + 3 workers + streamingnode.
+    dc up -d mixcoord proxy querynode datanode streamingnode
   else
     dc up -d milvus
   fi

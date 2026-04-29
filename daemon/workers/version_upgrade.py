@@ -307,9 +307,10 @@ def _milvus_services() -> list[str]:
     if tag.startswith("v2.5"):
         return ["mixcoord", "proxy", "querynode", "datanode", "indexnode"]
     if mode == "distributed":
+        # 2.6 cluster mode — indexnode dropped in 2.6 (merged into
+        # datanode); streamingnode added for woodpecker WAL.
         return [
-            "mixcoord", "proxy", "querynode", "datanode",
-            "indexnode", "streamingnode",
+            "mixcoord", "proxy", "querynode", "datanode", "streamingnode",
         ]
     return ["milvus"]
 
