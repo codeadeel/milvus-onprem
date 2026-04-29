@@ -230,14 +230,14 @@ _gen_secret_key() {
   fi
 }
 
-# Build the control-plane daemon image. No-op on layer-cache hits.
+# Build the control-plane daemon image. Always invoked; docker's layer
+# cache handles the no-change case in milliseconds, but a previous
+# version of this function early-returned on `image inspect` success
+# which left stale code in the running container after daemon source
+# edits — every code change required `docker rmi` + re-init by hand.
 _init_build_daemon_image() {
   local image="${CONTROL_PLANE_IMAGE:-milvus-onprem-cp:dev}"
-  if docker image inspect "$image" >/dev/null 2>&1; then
-    info "daemon image $image already built"
-    return 0
-  fi
-  info "building daemon image $image (one-time per node)"
+  info "building daemon image $image (uses docker layer cache when unchanged)"
   docker build -t "$image" "$REPO_ROOT/daemon/" \
     || die "daemon image build failed — see docker output above"
 }

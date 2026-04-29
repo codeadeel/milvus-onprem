@@ -40,12 +40,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 from typing import Any
 
 import httpx
 
 from ..handlers import _upsert_kv
 from ..jobs import JobContext, register_handler
+
+
+def _shquote(s: str) -> str:
+    """Single-quote a string for safe inclusion in a shell command line."""
+    return shlex.quote(s)
 
 log = logging.getLogger("daemon.workers.rotate_token")
 
@@ -72,10 +78,10 @@ async def run_rotate_token(ctx: JobContext) -> None:
         )
 
     leader_name = config.node_name
-    sorted_peers = sorted(
-        ((p["name"], p["ip"]) for p in topology.peers),
-        key=lambda ni: _node_sort_key(ni[0]),
-    )
+    # topology.peers is dict[node_name -> info_dict]; mirror the
+    # version_upgrade worker's iteration shape.
+    peers = sorted(topology.peers.items(), key=lambda kv: _node_sort_key(kv[0]))
+    sorted_peers = [(n, info["ip"]) for n, info in peers if info.get("ip")]
     follower_peers = [(n, ip) for n, ip in sorted_peers if n != leader_name]
 
     ctx.log_writer(f"rotating CLUSTER_TOKEN across {len(sorted_peers)} peer(s)")
@@ -152,23 +158,38 @@ async def rotate_self(ctx_log_writer, new_token: str) -> None:
     if not os.path.exists(compose_file):
         raise RuntimeError(f"rotate-self: rendered compose missing at {compose_file}")
 
-    # Schedule a detached recreate. Sleep first so the job framework
-    # can persist state=done / the HTTP response can return before the
-    # daemon container dies.
-    ctx_log_writer(f"scheduling self-recreate in {RECREATE_DELAY_S}s")
-    cmd = (
+    # Schedule the self-recreate via a SIDECAR container. A subprocess
+    # forked inside this daemon dies along with the daemon container
+    # when `docker compose up --force-recreate control-plane` runs (the
+    # subprocess and its parent docker compose CLI live in the dying
+    # container's PID tree). The sidecar is a sibling Docker container,
+    # owned by the host's dockerd, so it survives this daemon's death.
+    #
+    # The sidecar reuses our own image (already cached on every peer),
+    # has the host docker socket bind-mounted, and has the host repo
+    # path mounted so it can find the rendered docker-compose.yml.
+    image = os.environ.get("MILVUS_ONPREM_IMAGE", "milvus-onprem-cp:dev")
+    host_repo_root = _read_kv("HOST_REPO_ROOT") or REPO_PATH
+    sidecar_cmd = (
         f"sleep {RECREATE_DELAY_S} && "
         f"docker compose --project-name {node_name} -f {compose_file} "
-        f"up -d --force-recreate --no-deps control-plane "
-        f">/tmp/rotate-recreate.log 2>&1"
+        f"up -d --force-recreate --no-deps control-plane"
     )
-    # start_new_session puts the subprocess in its own process group so
-    # it survives the daemon's death.
-    await asyncio.create_subprocess_shell(
-        f"nohup bash -c '{cmd}' </dev/null >/dev/null 2>&1 &",
-        executable="/bin/bash",
-        start_new_session=True,
+    ctx_log_writer(f"spawning sidecar to recreate self in {RECREATE_DELAY_S}s")
+    rc, out, err = await _run_repo(
+        f"docker run -d --rm "
+        f"--name milvus-onprem-cp-recreate-{node_name} "
+        f"--network=host "
+        f"-v /var/run/docker.sock:/var/run/docker.sock "
+        f"-v {host_repo_root}:{REPO_PATH} "
+        f"--entrypoint /bin/sh "
+        f"{image} -c {_shquote(sidecar_cmd)} "
+        f">/tmp/rotate-recreate-sidecar.id 2>&1"
     )
+    if rc != 0:
+        raise RuntimeError(
+            f"could not spawn recreate sidecar (rc={rc}): {err.strip()[:300]}"
+        )
 
 
 async def _rotate_remote(

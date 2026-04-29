@@ -104,7 +104,8 @@ _env_apply_defaults() {
   # templates/2.5/docker-compose.yml.tpl. Mixcoord probes 53100
   # (rootcoord) — bound by both leader and standby, so it's a true
   # "process is alive" signal that doesn't trip on standby instances.
-  : "${MILVUS_ROOTCOORD_PORT:=53100}"
+  # MILVUS_ROOTCOORD_PORT default is version-conditional — see
+  # _env_apply_version_defaults() below. 2.5 → 53100, 2.6 → 22125.
   : "${MILVUS_QUERYNODE_PORT:=21123}"
   : "${MILVUS_DATANODE_PORT:=21124}"
   : "${MILVUS_INDEXNODE_PORT:=21121}"
@@ -160,6 +161,18 @@ _env_apply_version_defaults() {
       2.5) MQ_TYPE="pulsar" ;;       # 2.5 has no Woodpecker
       2.6) MQ_TYPE="woodpecker" ;;   # 2.6's embedded WAL
       *)   MQ_TYPE="woodpecker" ;;   # safe default for unknown versions
+    esac
+  fi
+  # rootCoord gRPC port — bound by the (mix)coord process. Used as
+  # the TCP-probe target for the cluster-mode mixcoord healthcheck.
+  # 2.5 binary defaults to 53100; 2.6 binary defaults to 22125. We
+  # set it here so the same MILVUS_ROOTCOORD_PORT placeholder works
+  # in both templates without per-version edits.
+  if [[ -z "${MILVUS_ROOTCOORD_PORT:-}" ]]; then
+    case "$MILVUS_VERSION" in
+      2.5) MILVUS_ROOTCOORD_PORT="53100" ;;
+      2.6) MILVUS_ROOTCOORD_PORT="22125" ;;
+      *)   MILVUS_ROOTCOORD_PORT="22125" ;;
     esac
   fi
   set +a

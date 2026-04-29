@@ -209,11 +209,7 @@ except Exception:
 # Build the daemon image locally if not already present. Idempotent.
 _join_build_daemon_image() {
   local image="${CONTROL_PLANE_IMAGE:-milvus-onprem-cp:dev}"
-  if docker image inspect "$image" >/dev/null 2>&1; then
-    info "daemon image $image already built"
-    return 0
-  fi
-  info "building daemon image $image (one-time per node)"
+  info "building daemon image $image (uses docker layer cache when unchanged)"
   docker build -t "$image" "$REPO_ROOT/daemon/" \
     || die "daemon image build failed — see docker output above"
 }
