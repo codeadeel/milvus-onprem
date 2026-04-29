@@ -521,6 +521,32 @@ class SyncPulsarHostRequest(BaseModel):
     pulsar_host: str
 
 
+@router.get(
+    "/admin/get-pulsar-host",
+    dependencies=[Depends(require_token)],
+    tags=["internal"],
+)
+async def get_admin_pulsar_host(request: Request) -> dict[str, Any]:
+    """Return this peer's currently-applied PULSAR_HOST (read from
+    the same /repo/cluster.env path the rest of the daemon reads).
+    Used by the migrate-pulsar worker's post-verify pass."""
+    # Match what role.sh defaults to when PULSAR_HOST is unset, so
+    # both sides agree on the "default → node-1" interpretation.
+    path = "/repo/cluster.env"
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == "PULSAR_HOST":
+                    return {"pulsar_host": v.strip().strip('"').strip("'")}
+    except FileNotFoundError:
+        pass
+    return {"pulsar_host": "node-1"}
+
+
 @router.post(
     "/admin/sync-pulsar-host",
     dependencies=[Depends(require_token)],

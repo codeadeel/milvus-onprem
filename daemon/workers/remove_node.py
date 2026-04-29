@@ -56,17 +56,24 @@ async def run_remove_node(ctx: JobContext) -> None:
     config = app.state.config
     topology = app.state.topology
 
-    # 1. Validate against the in-memory topology mirror (fresh after the
-    #    watcher seeded itself at startup).
-    target_name = _find_node_name_by_ip(topology.peers, target_ip)
+    # 1. AUTHORITATIVE SNAPSHOT. Read topology directly from etcd
+    #    rather than from the watcher's mirror. The watcher is
+    #    eventually consistent — a peer that just finished /join may
+    #    have committed its topology PUT but not yet triggered the
+    #    watcher event on this leader, and trusting the mirror would
+    #    give the operator misleading "no such peer" / "only one
+    #    peer" errors. Same anti-staleness pattern the migrate-pulsar
+    #    worker uses.
+    auth_peers = await topology.authoritative_peers()
+    target_name = _find_node_name_by_ip(auth_peers, target_ip)
     if target_name is None:
         raise ValueError(
             f"no peer found with ip={target_ip}; topology has: "
-            f"{sorted({p.get('ip') for p in topology.peers.values()})}"
+            f"{sorted({p.get('ip') for p in auth_peers.values()})}"
         )
     ctx.log_writer(f"resolved {target_ip} -> {target_name}")
 
-    if topology.peer_count <= 1:
+    if len(auth_peers) <= 1:
         raise ValueError(
             "refusing to remove the only peer in the cluster — that would "
             "destroy the cluster. teardown the whole cluster instead."

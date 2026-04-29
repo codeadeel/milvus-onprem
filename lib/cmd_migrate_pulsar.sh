@@ -94,6 +94,23 @@ EOF
     fi
   fi
 
+  # Operator-side preflight. The daemon worker also preflights, but
+  # surfacing a clear error here saves a round-trip and a job-id that
+  # the operator would otherwise have to query. Refuse to submit if
+  # any peer's reachability check is failing — in particular, a peer
+  # that just finished /join may not yet be in the leader's topology
+  # mirror, and a half-applied migration is much worse than no
+  # migration.
+  info "==> preflight: confirming all peers are reachable"
+  local status_out
+  status_out=$(./milvus-onprem status 2>&1) \
+    || die "preflight: \`status\` errored — fix that before migrating"
+  if printf '%s' "$status_out" | grep -E '^[[:space:]]*\[FAIL\]' >/dev/null; then
+    echo "$status_out" | grep -E 'reachability|FAIL' | head -20
+    die "preflight: at least one peer is not reachable. Wait for the cluster to settle (\`./milvus-onprem status\` should show all peers OK), then retry."
+  fi
+  ok "preflight: all peers reachable"
+
   _migrate_pulsar_via_daemon "$to_node"
 }
 

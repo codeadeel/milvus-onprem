@@ -57,6 +57,41 @@ class TopologyWatcher:
         """IPs of all peers, in arbitrary dict order."""
         return [p.get("ip", "") for p in self.peers.values() if p.get("ip")]
 
+    async def authoritative_peers(self) -> dict[str, dict[str, Any]]:
+        """Return the topology as a fresh, linearizable read from etcd.
+
+        `self.peers` is the WATCHER's mirror, populated reactively from
+        the etcd watch stream. It is eventually consistent with etcd,
+        which is fine for handlers (they fire on a watch event the
+        watcher already applied). It is NOT fine for workers driving
+        cluster-wide operator actions — a recent topology PUT (e.g.,
+        a peer that just finished /join) may not yet have triggered
+        the local watcher event, and the worker would silently skip
+        that peer.
+
+        Workers handling migrate-pulsar / remove-node / rotate-token /
+        any other "fan out an operation across every peer" job MUST
+        use this method instead of `self.peers`. It does a single
+        `get_prefix` against etcd — a quorum-protected read — so the
+        returned snapshot is at least as fresh as any committed write.
+
+        Returns the same shape as `self.peers`: {node_name: info_dict}.
+        Malformed entries are dropped with a warning.
+        """
+        raw = await self._etcd.get_prefix(TOPOLOGY_PREFIX)
+        out: dict[str, dict[str, Any]] = {}
+        for key, val in raw.items():
+            name = key.removeprefix(TOPOLOGY_PREFIX)
+            try:
+                out[name] = json.loads(val)
+            except json.JSONDecodeError:
+                log.warning(
+                    "ignoring malformed topology entry %s in "
+                    "authoritative_peers read",
+                    name,
+                )
+        return out
+
     def on_change(self, handler: ChangeHandler) -> None:
         """Register an async callback fired on every topology change."""
         self._handlers.append(handler)

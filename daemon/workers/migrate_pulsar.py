@@ -4,33 +4,49 @@ Moves the 2.5 Pulsar singleton from its current PULSAR_HOST to a
 named target peer, so the operator can subsequently `remove-node`
 the old host without breaking the cluster's message queue.
 
-Important caveats — these are intentional simplifications, not bugs:
-  - Brief unavailability. Every peer's Milvus is recreated to pick up
-    the new pulsar.address. Read-only ops fail until Milvus is
-    healthy again on each peer (~30-60s per peer, sequenced).
-  - Lossy migration. Topic backlog still pending on the old Pulsar
-    instance is dropped — the new instance starts with empty
-    topics. Operators are expected to run this during a maintenance
-    window with no active inserts.
+Production-grade discipline (the 1729afb / fcd773c / b965560 series
+established the pattern; this worker follows it explicitly):
 
-The full-fidelity migration (Pulsar replication / topic drain) is
-out of scope; the recommended long-term path is upgrading to Milvus
-2.6, where Woodpecker replaces the singleton broker with a per-peer
-streamingnode.
+  1. AUTHORITATIVE SNAPSHOT — read topology directly from etcd
+     (linearizable get_prefix), not from the watcher's mirror. The
+     watcher is eventually consistent; a peer that just finished
+     /join may not have triggered the watcher event yet, and
+     trusting the mirror would silently skip that peer (split-brain
+     Pulsar).
+
+  2. PREFLIGHT — every peer's daemon must answer /health within a
+     short timeout. If any are unreachable, ABORT before any side
+     effects. The operator can re-run after the cluster settles.
+     Half-applied migration leaves Milvus on different peers
+     pointing at different brokers — much worse than no migration.
+
+  3. PER-PEER FAIL-LOUD — apply errors raise. The job state surfaces
+     the failed peer to the operator. Continuing past a failure
+     would leave the cluster split between peers that successfully
+     reconfigured and those that didn't.
+
+  4. POST-VERIFY — after the apply sweep, re-read every peer's
+     PULSAR_HOST via the new /admin/get-pulsar-host endpoint and
+     fail unless every survivor reports the new value. Catches the
+     case where a peer's apply call returned 200 but the file write
+     was somehow lost.
+
+Caveats called out in the CLI --help (intentional simplifications,
+not bugs):
+  - Brief unavailability per peer during recreate (~30-60s each).
+  - Lossy: Pulsar topic backlog still pending on the old broker is
+    dropped — the new broker starts with empty topics. Operators
+    are expected to run during a maintenance window with no active
+    inserts.
 
 Params:
     to_node     (required) name of the target peer (e.g. "node-2").
-                Must already be in the topology mirror.
-
-Refuses if:
-    - to_node is missing or not in topology
-    - to_node already IS the current PULSAR_HOST
-    - this deploy isn't 2.5 / pulsar (target peer would have no
-      Pulsar service block in its render anyway)
+                Must be in the authoritative topology snapshot.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -69,50 +85,70 @@ async def run_migrate_pulsar(ctx: JobContext) -> None:
             "redirect)"
         )
 
-    if to_node not in topology.peers:
+    # Step 1 — AUTHORITATIVE SNAPSHOT. The watcher's mirror is
+    # eventually consistent; a peer whose /join just finished may
+    # have committed its topology PUT but not yet fired the watcher
+    # event on this leader. Iterating `topology.peers` would skip it.
+    peers = await topology.authoritative_peers()
+    ctx.log_writer(
+        f"authoritative topology: {len(peers)} peers — "
+        f"{sorted(peers)}"
+    )
+
+    if to_node not in peers:
         raise ValueError(
             f"to_node={to_node!r} is not in topology. Known peers: "
-            f"{sorted(topology.peers)}"
+            f"{sorted(peers)}"
         )
-    target_info = topology.peers[to_node]
-    target_ip = target_info.get("ip")
+    target_ip = (peers[to_node] or {}).get("ip")
     if not target_ip:
         raise ValueError(f"topology entry for {to_node} has no ip")
 
     current_host = _read_cluster_env_value("PULSAR_HOST", "node-1")
     if current_host == to_node:
-        ctx.log_writer(
-            f"PULSAR_HOST is already {to_node}; nothing to do"
-        )
+        ctx.log_writer(f"PULSAR_HOST is already {to_node}; nothing to do")
         return
 
-    current_info = topology.peers.get(current_host) or {}
-    current_ip = current_info.get("ip", "")
+    current_ip = (peers.get(current_host) or {}).get("ip", "")
     ctx.log_writer(
         f"migrating Pulsar: {current_host} ({current_ip or '?'}) "
         f"-> {to_node} ({target_ip})"
     )
     ctx.progress_setter(0.05)
 
-    # Order matters: bring up Pulsar on the new host BEFORE pointing
-    # any Milvus at it (otherwise Milvus would dial a not-yet-up
-    # broker), and tear down old Pulsar LAST (so a Milvus that hasn't
-    # reconnected yet can keep using the old broker until its turn).
+    # Step 2 — PREFLIGHT. Every peer must be reachable. We refuse to
+    # start a migration that we know will leave the cluster split.
+    unreachable = await _preflight_peers_reachable(
+        peers, config.cluster_token, config.listen_port
+    )
+    if unreachable:
+        raise RuntimeError(
+            f"preflight: cannot reach daemon on {len(unreachable)} "
+            f"peer(s): {unreachable}. Migration aborted before any "
+            f"side effects. Wait for `./milvus-onprem status` to "
+            f"report all peers reachable, then retry."
+        )
+    ctx.log_writer(f"preflight: all {len(peers)} peers reachable")
+    ctx.progress_setter(0.10)
+
+    # Step 3 — APPLY. Order matters: bring up Pulsar on the new host
+    # BEFORE pointing any Milvus at it; tear down old Pulsar LAST.
     sequenced: list[tuple[str, str, str]] = []  # (label, name, ip)
     sequenced.append(("new pulsar host", to_node, target_ip))
     from ..joining import _node_sort_key
-    for name in sorted(topology.peers, key=_node_sort_key):
+    for name in sorted(peers, key=_node_sort_key):
         if name in (to_node, current_host):
             continue
-        info = topology.peers.get(name) or {}
-        ip = info.get("ip", "")
+        ip = (peers.get(name) or {}).get("ip", "")
         if ip:
             sequenced.append(("milvus-only peer", name, ip))
     if current_ip:
-        sequenced.append(("old pulsar host (now milvus-only)", current_host, current_ip))
+        sequenced.append(
+            ("old pulsar host (now milvus-only)", current_host, current_ip)
+        )
 
-    progress_step = 0.85 / max(1, len(sequenced))
-    progress = 0.05
+    progress_step = 0.70 / max(1, len(sequenced))
+    progress = 0.10
     for label, name, ip in sequenced:
         ctx.log_writer(f"==> {label}: {name} @ {ip}")
         try:
@@ -121,22 +157,108 @@ async def run_migrate_pulsar(ctx: JobContext) -> None:
             )
             ctx.log_writer(f"    {name} done")
         except Exception as e:
-            # Continue on failure — partial progress is better than
-            # leaving the cluster half-converged. The next manual
-            # rerun finds whatever didn't apply and re-applies it
-            # (handler is idempotent).
-            ctx.log_writer(
-                f"    {name} FAILED: {type(e).__name__}: {e}"
-            )
+            # FAIL-LOUD. Partial migration is worse than no migration:
+            # peers that already applied point at the new broker;
+            # peers that didn't, point at the old. Surface the failure
+            # so the operator can fix it (e.g., reboot the stuck
+            # peer's daemon) and rerun. The handler is idempotent so
+            # rerunning is safe.
+            raise RuntimeError(
+                f"sync-pulsar-host on {name} ({ip}) failed: "
+                f"{type(e).__name__}: {e}. Migration aborted; "
+                f"some peers may have applied and some may not. "
+                f"Inspect cluster.env on each peer's PULSAR_HOST "
+                f"and rerun migrate-pulsar after fixing the stuck "
+                f"peer."
+            ) from e
         progress += progress_step
-        ctx.progress_setter(min(0.95, progress))
+        ctx.progress_setter(min(0.85, progress))
 
+    # Step 4 — POST-VERIFY. Read every peer's currently-applied
+    # PULSAR_HOST and confirm everyone is on the new value. Catches
+    # the path where a sync-pulsar-host returned 200 but the actual
+    # cluster.env write didn't take.
+    ctx.log_writer("post-verify: confirming PULSAR_HOST on every peer")
+    mismatches = await _verify_pulsar_host_everywhere(
+        peers, to_node, config.cluster_token, config.listen_port
+    )
+    if mismatches:
+        raise RuntimeError(
+            f"post-verify FAILED. Expected PULSAR_HOST={to_node} on "
+            f"every peer; mismatches: {mismatches}. The cluster is "
+            f"in a partially-migrated state — operator action "
+            f"required."
+        )
     ctx.log_writer(
-        f"migrate-pulsar finished. New PULSAR_HOST is {to_node} "
-        f"({target_ip}). You can now `./milvus-onprem remove-node "
+        f"migrate-pulsar finished. PULSAR_HOST={to_node} ({target_ip}) "
+        f"on every peer. You can now `./milvus-onprem remove-node "
         f"--ip={current_ip}` if removing the old host was the goal."
     )
     ctx.progress_setter(1.0)
+
+
+async def _preflight_peers_reachable(
+    peers: dict[str, dict[str, Any]],
+    cluster_token: str,
+    listen_port: int,
+) -> list[str]:
+    """Concurrently probe every peer's daemon /health. Return the list
+    of peer labels (`<name>@<ip>`) that didn't answer 200 within 5s."""
+    async def probe(name: str, ip: str) -> tuple[str, str, bool]:
+        url = f"http://{ip}:{listen_port}/health"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {cluster_token}"},
+                )
+                return (name, ip, resp.status_code == 200)
+        except Exception:
+            return (name, ip, False)
+
+    tasks = [
+        probe(name, info.get("ip", ""))
+        for name, info in peers.items()
+        if info.get("ip")
+    ]
+    results = await asyncio.gather(*tasks)
+    return [f"{name}@{ip}" for name, ip, ok in results if not ok]
+
+
+async def _verify_pulsar_host_everywhere(
+    peers: dict[str, dict[str, Any]],
+    expected_host: str,
+    cluster_token: str,
+    listen_port: int,
+) -> list[str]:
+    """Concurrently fetch each peer's `/admin/get-pulsar-host` and
+    return labels of any peer whose PULSAR_HOST differs from
+    `expected_host` (or whose endpoint is unreachable)."""
+    async def fetch(name: str, ip: str) -> tuple[str, str, str | None]:
+        url = f"http://{ip}:{listen_port}/admin/get-pulsar-host"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {cluster_token}"},
+                )
+                if resp.status_code != 200:
+                    return (name, ip, None)
+                return (name, ip, resp.json().get("pulsar_host"))
+        except Exception:
+            return (name, ip, None)
+
+    tasks = [
+        fetch(name, info.get("ip", ""))
+        for name, info in peers.items()
+        if info.get("ip")
+    ]
+    results = await asyncio.gather(*tasks)
+    return [
+        f"{name}@{ip}={got!r}"
+        for name, ip, got in results
+        if got != expected_host
+    ]
 
 
 async def _rpc_sync_pulsar_host(
