@@ -407,6 +407,65 @@ class RecreateMinioSelfResponse(BaseModel):
 
 
 @router.post(
+    "/admin/sweep",
+    dependencies=[Depends(require_token)],
+    tags=["internal"],
+)
+async def post_admin_sweep(request: Request) -> dict[str, Any]:
+    """Trigger an immediate stuck-running + retention sweep.
+
+    Normally runs on a 30s/1h timer (see daemon/main.py). Useful as
+    an operator-on-demand action — e.g. after killing a misconfigured
+    daemon, force the new leader to clean up the resulting stuck
+    `running` job entries instead of waiting for the next scheduled
+    sweep. Leader-only; followers redirect via 307 (the bash CLI's
+    `milvus-onprem maintenance --prune-etcd-jobs` calls this with
+    `curl --location-trusted`).
+    """
+    leader = request.app.state.leader
+    config = request.app.state.config
+    jobs_mgr = request.app.state.jobs
+
+    if not leader.is_leader:
+        # Same 307 redirect pattern as /jobs.
+        etcd = request.app.state.etcd
+        leader_info_raw = await etcd.get(LEADER_KEY)
+        if not leader_info_raw:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="no leader currently; retry shortly",
+            )
+        try:
+            info = json.loads(leader_info_raw)
+            redirect_to = (
+                f"http://{info['ip']}:{config.listen_port}/admin/sweep"
+            )
+            return JSONResponse(
+                status_code=307,
+                headers={"Location": redirect_to},
+                content={
+                    "redirect_to": redirect_to,
+                    "leader": info["ip"],
+                    "hint": "POST /admin/sweep must reach the leader; retry against `redirect_to` or use --location-trusted",
+                },
+            )
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"leader info unparsable: {e}",
+            )
+
+    pruned_terminated = await jobs_mgr.prune_old(config.jobs_retention_s)
+    pruned_stuck = await jobs_mgr.prune_stuck_running(
+        config.jobs_heartbeat_timeout_s
+    )
+    return {
+        "pruned_terminated": pruned_terminated,
+        "pruned_stuck_running": pruned_stuck,
+    }
+
+
+@router.post(
     "/recreate-minio-self",
     dependencies=[Depends(require_token)],
     tags=["internal"],

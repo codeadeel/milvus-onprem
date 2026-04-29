@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from typing import Any
 
@@ -115,6 +116,20 @@ async def run_version_upgrade(ctx: JobContext) -> None:
 
     ctx.log_writer("")
     ctx.log_writer(f"OK rolling upgrade to {target} complete on all {n} peers.")
+
+    # Refresh the cluster-wide version anchor in etcd. lib/render.sh
+    # checks this on every render and refuses to render when a peer's
+    # cluster.env disagrees with the cluster's canonical version.
+    # Resolves QA finding F-R4-C.1 — without the refresh, a partial
+    # upgrade or stale anchor could cause render to refuse legitimate
+    # operations on already-upgraded peers.
+    from daemon.main import CLUSTER_VERSION_KEY
+    etcd = app.state.etcd
+    try:
+        await etcd.put(CLUSTER_VERSION_KEY, target)
+        ctx.log_writer(f"updated cluster-version anchor at {CLUSTER_VERSION_KEY} -> {target}")
+    except Exception as e:
+        ctx.log_writer(f"WARN failed to update cluster-version anchor: {e}")
 
 
 # ── per-peer local upgrade ───────────────────────────────────────────
@@ -232,13 +247,23 @@ async def _upgrade_remote(
 
 
 async def _run_repo(cmd: str) -> tuple[int, str, str]:
-    """Run a shell command from /repo. Returns (rc, stdout, stderr)."""
+    """Run a shell command from /repo. Returns (rc, stdout, stderr).
+
+    Sets MILVUS_ONPREM_INTERNAL=1 so the bash CLI's multi-version
+    render guard (lib/render.sh — F-R4-C.1 fix) skips its etcd check.
+    The upgrade flow legitimately renders with a NEW tag while etcd's
+    cluster-wide anchor still holds the OLD tag (the worker updates
+    the anchor only after the rolling sweep completes); without the
+    bypass the worker's own render would refuse mid-upgrade.
+    """
     full = f"cd {REPO_PATH} && {cmd}"
+    env = {**os.environ, "MILVUS_ONPREM_INTERNAL": "1"}
     proc = await asyncio.create_subprocess_shell(
         full,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         executable="/bin/bash",
+        env=env,
     )
     stdout, stderr = await proc.communicate()
     rc = proc.returncode if proc.returncode is not None else -1

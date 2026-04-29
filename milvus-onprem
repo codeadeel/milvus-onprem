@@ -77,6 +77,12 @@ Usage: milvus-onprem <command> [options]
   uninstall        Reverse of install (does not touch data — see teardown).
   watchdog         Long-running peer-down poller (used by milvus-watchdog.service).
 
+  maintenance      Operator hygiene: prune dangling docker images, truncate
+                   container logs, force etcd-jobs sweep. See --help.
+  rotate-token     Rotate CLUSTER_TOKEN atomically across every peer
+                   (distributed mode). Avoids the per-peer rotation window
+                   where daemon-to-daemon RPCs would otherwise fail.
+
   help             Show this message.
 
 For per-command help: milvus-onprem <command> --help
@@ -117,6 +123,8 @@ main() {
     install)         cmd_install         "$@" ;;
     uninstall)       cmd_uninstall       "$@" ;;
     watchdog)        cmd_watchdog        "$@" ;;
+    maintenance)     cmd_maintenance     "$@" ;;
+    rotate-token)    cmd_rotate_token    "$@" ;;
     -h|--help|help)  usage ;;
     *)               err "unknown command: $cmd"; usage; exit 1 ;;
   esac

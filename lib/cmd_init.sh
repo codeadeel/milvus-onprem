@@ -30,6 +30,7 @@ cmd_init() {
   local milvus_port="" lb_port="" etcd_client_port="" etcd_peer_port=""
   local minio_api_port="" control_plane_port=""
   local overwrite=0
+  local force=0
   local skip_bootstrap=0
 
   while [[ $# -gt 0 ]]; do
@@ -50,6 +51,7 @@ cmd_init() {
       --minio-api-port=*)      minio_api_port="${1#*=}"; shift ;;
       --control-plane-port=*)  control_plane_port="${1#*=}"; shift ;;
       --overwrite)             overwrite=1; shift ;;
+      --force)                 force=1; shift ;;
       --skip-bootstrap)        skip_bootstrap=1; shift ;;
       -h|--help)               _cmd_init_help; return 0 ;;
       *) die "unknown flag: $1 (try: milvus-onprem init --help)" ;;
@@ -59,9 +61,32 @@ cmd_init() {
   # Resolve the mode — flag wins; otherwise prompt; default standalone.
   mode="$(_init_resolve_mode "$mode")"
 
+  # Validate cluster-name: only safe characters that won't corrupt
+  # cluster.env when sourced as bash (QA finding F-B4.1: spaces in
+  # the name silently produced a malformed file that errored at
+  # parse time with "command not found"). Allow letters, digits,
+  # underscore, hyphen, period — strict but covers all reasonable
+  # cluster IDs.
+  if ! [[ "$cluster_name" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    die "--cluster-name=\"$cluster_name\" must match ^[A-Za-z0-9_.-]+$ (no spaces or shell metacharacters); strict validation prevents corrupting cluster.env"
+  fi
+
   # Refuse to clobber an existing cluster.env unless asked.
   if [[ -f "$CLUSTER_ENV" && "$overwrite" -ne 1 ]]; then
     die "cluster.env already exists at $CLUSTER_ENV — pass --overwrite to replace it (or run \`milvus-onprem teardown --full\` first)"
+  fi
+
+  # Even with --overwrite, refuse if the daemon container is running.
+  # An operator who runs `init --overwrite` against a live cluster
+  # silently wipes the canonical cluster.env, breaking peer auth and
+  # trampling the cluster's PEER_IPS / CLUSTER_TOKEN. (QA finding
+  # F-B4.3: we caught this the hard way during a QA pass.) The
+  # `--force` escape hatch lets operators who genuinely want to
+  # reset still do so without first running teardown.
+  if [[ "$overwrite" -eq 1 && "$force" -ne 1 ]] && \
+     docker ps --filter 'name=^milvus-onprem-cp$' --format '{{.Names}}' 2>/dev/null \
+       | grep -q '.'; then
+    die "milvus-onprem-cp is RUNNING — refusing to clobber cluster.env on a live cluster. Run \`./milvus-onprem teardown --full --force\` first, or pass \`--force\` to override (this WILL break the running cluster's daemon auth)."
   fi
 
   # Self-IP detection. Operator can override via --local-ip if hostname -I
@@ -69,6 +94,18 @@ cmd_init() {
   if [[ -z "$local_ip" ]]; then
     local_ip="$(_init_detect_local_ip)" \
       || die "couldn't auto-detect local IP from \`hostname -I\`. Pass --local-ip=<ip> explicitly."
+  fi
+
+  # Pre-flight: --data-root must be writable (or its parent must be,
+  # so we can create it). QA finding F-B4.2: pointing init at e.g.
+  # /proc/sys/kernel used to print mkdir errors but continue.
+  local data_parent
+  data_parent="$(dirname "$data_root")"
+  if [[ ! -d "$data_root" && ! -w "$data_parent" ]]; then
+    die "--data-root=$data_root: parent directory $data_parent is not writable. Pick a path on a writable filesystem (default /data; common alternatives /var/lib/milvus, ~/milvus-data)."
+  fi
+  if [[ -d "$data_root" && ! -w "$data_root" ]]; then
+    die "--data-root=$data_root exists but is not writable by user $(id -un). Fix with \`sudo chown $(id -un) $data_root\` or pick a different path."
   fi
 
   # Default the Milvus image tag if not given.
@@ -318,6 +355,12 @@ PORT OVERRIDES (rarely needed):
 
 OTHER:
   --overwrite                 Replace an existing cluster.env without prompt.
+                              Refused if a daemon container is running on this
+                              host (would silently corrupt a live cluster).
+  --force                     Companion to --overwrite — proceed even if a
+                              daemon container is running. Will break the
+                              running cluster's daemon auth; use only when
+                              you know what you're doing.
   --skip-bootstrap            Write cluster.env + host_prep but don't start
                               services. Operator runs 'bootstrap' separately.
   -h, --help                  Show this help.

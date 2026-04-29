@@ -41,6 +41,45 @@ def _setup_logging(level_name: str) -> None:
 log = logging.getLogger("daemon")
 
 
+CLUSTER_VERSION_KEY = "/cluster/milvus_version"
+
+
+async def _register_cluster_version(etcd: EtcdClient) -> None:
+    """Write the cluster's canonical MILVUS_IMAGE_TAG to etcd if absent.
+
+    Read by `lib/render.sh` (via etcdctl) to refuse rendering when a
+    peer's cluster.env disagrees with the cluster — resolves QA finding
+    F-R4-C.1, where a manual edit of one peer's MILVUS_IMAGE_TAG could
+    silently produce a multi-version cluster that fails at runtime in
+    confusing ways.
+
+    Source-of-truth: this peer's own cluster.env at daemon start.
+    Idempotent — `put_if_absent` is a no-op when the key already
+    exists. The version-upgrade worker explicitly overwrites this on
+    successful rollout.
+    """
+    # Read MILVUS_IMAGE_TAG from cluster.env. The daemon container has
+    # cluster.env bind-mounted read-only at /etc/milvus-onprem/cluster.env.
+    try:
+        with open("/etc/milvus-onprem/cluster.env") as f:
+            for line in f:
+                if line.startswith("MILVUS_IMAGE_TAG="):
+                    tag = line.partition("=")[2].strip()
+                    break
+            else:
+                log.warning("MILVUS_IMAGE_TAG missing from cluster.env; "
+                            "skipping cluster-version anchor")
+                return
+    except FileNotFoundError:
+        log.warning("cluster.env not mounted; skipping cluster-version anchor")
+        return
+
+    written = await etcd.put_if_absent(CLUSTER_VERSION_KEY, tag)
+    if written:
+        log.info("registered cluster MILVUS_IMAGE_TAG=%s in etcd at %s",
+                 tag, CLUSTER_VERSION_KEY)
+
+
 async def _register_self_if_absent(etcd: EtcdClient, config: DaemonConfig) -> None:
     """Write this peer's topology entry on first start (idempotent).
 
@@ -191,6 +230,11 @@ async def lifespan(app: FastAPI):
         await _register_self_if_absent(etcd, config)
     except Exception as e:
         log.warning("self-register deferred: %s (will retry on leader)", e)
+
+    try:
+        await _register_cluster_version(etcd)
+    except Exception as e:
+        log.warning("cluster-version anchor deferred: %s", e)
 
     elector_task = asyncio.create_task(elector.run(), name="leader-elector")
     topology_task = asyncio.create_task(topology.run(), name="topology-watcher")

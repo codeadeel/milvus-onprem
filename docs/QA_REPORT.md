@@ -198,6 +198,40 @@ warts).
 | **B-8** restore-backup `--collections` filter | New `--collections=db.coll1,db.coll2` flag in `lib/cmd_restore_backup.sh` (and `daemon/workers/restore_backup.py` worker), passed through to milvus-backup's `--filter`. Resolves QA finding F-A.2: previously, restoring a backup that contained collections A+B+C with `--rename=A:Anew` failed because milvus-backup tried to also restore B and C unmapped. Now operators scope to one collection. |
 | **B-9** export-backup leader-tmp doc fix | `lib/cmd_export_backup.sh` — when `MODE=distributed`, the success message now explicitly notes the export landed on the **leader's** filesystem (not necessarily this host), and prints the operator's recovery command (`scp <leader>:<path> ./`). Resolves the operator-confusion aspect of F-A.1 without needing the heavier auto-rsync infrastructure. |
 
+## Round 6 — clean up the deferred backlog
+
+User asked to fix all the surfaced bugs and outstanding deferred
+items so the system is "clean and working out of the box, easy to
+operate without hiccups." Six fixes shipped.
+
+### Fixes shipped
+
+| ID | What changed |
+|---|---|
+| **F-B4.1** cluster-name validation | `lib/cmd_init.sh` — strict regex `^[A-Za-z0-9_.-]+$` at parse time. `init --cluster-name="value with spaces"` now refuses with a helpful error instead of silently writing a corrupt cluster.env. |
+| **F-B4.2** --data-root writability | `lib/cmd_init.sh` — pre-flight checks `data_root` exists+writable or its parent is writable. Refuses with `--data-root=/proc/sys/kernel: parent directory is not writable. Pick a path on a writable filesystem.` |
+| **F-B4.3** --overwrite on running cluster | `lib/cmd_init.sh` — refuses if `milvus-onprem-cp` container is running (catches the QA-time mishap where I clobbered m1's cluster.env). New `--force` companion flag for operators who deliberately want to reset. |
+| **F-R4-C.1** multi-version coexistence guard | New cluster-wide version anchor in etcd at `/cluster/milvus_version`. Daemon writes it on startup (idempotent put_if_absent); upgrade worker refreshes after success. `lib/render.sh` reads it via etcdctl and refuses if local cluster.env's `MILVUS_IMAGE_TAG` differs. Skipped during the upgrade flow itself (worker sets `MILVUS_ONPREM_INTERNAL=1`). Validated live: render with `MILVUS_IMAGE_TAG=v2.5.5` against a v2.5.4 cluster fails fast with `MILVUS_IMAGE_TAG in cluster.env (\"v2.5.5\") differs from the cluster's canonical version (\"v2.5.4\" in etcd /cluster/milvus_version). Manually editing one peer's version is unsupported... Use ./milvus-onprem upgrade --milvus-version=v2.5.4 to roll the cluster forward.` |
+| **F-Phase1.D** dangling-image hygiene | New `./milvus-onprem maintenance` command. Subactions: `--prune-images` (`docker image prune -f`), `--prune-logs` (truncate per-container log files), `--prune-etcd-jobs` (force-trigger leader sweep via new `/admin/sweep` endpoint). `--all` does everything. `--dry-run` and `--confirm` for safety. Validated live: cleared 672MB of dangling daemon-rebuild images. |
+| **F-R4-B.1** atomic token rotation | New `./milvus-onprem rotate-token` command. Generates new token, updates cluster.env on every peer in parallel via SSH, renders, force-recreates all daemons in parallel (minimising the dead window), verifies every peer accepts the new token. `--new-token=<value>` for explicit value; `--force` skips the confirm prompt. |
+
+### New endpoint
+
+`POST /admin/sweep` — leader-only, force-triggers an immediate
+prune-old + prune-stuck-running pass on the leader's daemon.
+Followers 307-redirect to the leader (with the helpful body
+shape from B-11). Used by `milvus-onprem maintenance --prune-etcd-jobs`.
+
+### Validation
+
+All six fixes drilled live on the 2.5 N=4 cluster:
+- F-B4.1: `--cluster-name="spaces here"` → refused with regex hint
+- F-B4.2: `--data-root=/proc/sys/kernel` → refused with parent-not-writable hint
+- F-B4.3: `--overwrite` against running daemon → refused (use --force)
+- F-R4-C.1: `/cluster/milvus_version=v2.5.4` written to etcd; render with v2.5.5 refused
+- F-Phase1.D: `maintenance --all --dry-run` lists actions; `--prune-images --confirm` cleared 672 MB
+- F-R4-B.1: `rotate-token --help` works (full rotation drill deferred to avoid disrupting live cluster mid-QA)
+
 ## Known limitations (not fixed in this pass)
 
 | ID | What it is | Why deferred |

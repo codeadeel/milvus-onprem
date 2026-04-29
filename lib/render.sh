@@ -18,6 +18,28 @@ render_all() {
   local out_dir="$RENDERED_DIR/$NODE_NAME"
   mkdir -p "$out_dir"
 
+  # QA finding F-R4-C.1: refuse to render when this peer's
+  # MILVUS_IMAGE_TAG disagrees with the cluster's canonical anchor in
+  # etcd (`/cluster/milvus_version`). An operator who manually edits
+  # one peer's cluster.env to a different tag used to silently produce
+  # a multi-version cluster that fails at runtime in confusing ways.
+  # Now caught at render time with an actionable message. Skipped on
+  # standalone (no etcd cluster) and during the upgrade flow itself
+  # (the upgrade worker writes the new anchor explicitly after success).
+  if [[ "${MODE:-standalone}" == "distributed" ]] \
+     && [[ -z "${MILVUS_ONPREM_INTERNAL:-}" ]] \
+     && docker ps --filter 'name=^milvus-etcd$' --format '{{.Names}}' 2>/dev/null \
+        | grep -q .; then
+    local cluster_tag
+    cluster_tag="$(docker exec milvus-etcd /usr/local/bin/etcdctl \
+      --endpoints="http://127.0.0.1:${ETCD_CLIENT_PORT}" \
+      get /cluster/milvus_version --print-value-only 2>/dev/null \
+      | head -1)"
+    if [[ -n "$cluster_tag" && "$cluster_tag" != "$MILVUS_IMAGE_TAG" ]]; then
+      die "MILVUS_IMAGE_TAG in cluster.env (\"$MILVUS_IMAGE_TAG\") differs from the cluster's canonical version (\"$cluster_tag\" in etcd /cluster/milvus_version). Manually editing one peer's version is unsupported and produces a multi-version cluster that fails at runtime. Use \`./milvus-onprem upgrade --milvus-version=$cluster_tag\` to roll the cluster forward, or restore cluster.env to match."
+    fi
+  fi
+
   _render_compute_derived
 
   info "rendering templates for $NODE_NAME (Milvus $MILVUS_VERSION) → $out_dir"
