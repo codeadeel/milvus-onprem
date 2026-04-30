@@ -102,9 +102,26 @@ done:
 ```python
 from pymilvus import MilvusClient, DataType
 
-# Connect to ANY peer's nginx LB. nginx routes around dead peers
-# automatically — no failover code needed in your app.
-client = MilvusClient(uri="http://10.0.0.10:19537")
+# Every peer runs its own nginx LB on :19537 — they're all equivalent.
+# Once you hand pymilvus a URI, nginx on THAT peer routes around dead
+# Milvus backends across the whole cluster. But if THAT peer itself
+# dies (VM-down, kernel panic, network partition), the client connection
+# breaks. The realistic HA pattern is a small helper that tries each
+# peer's LB in order:
+PEERS = ["10.0.0.10", "10.0.0.11", "10.0.0.12"]   # any/all peer IPs
+
+def connect_ha(timeout=5):
+    """Return a MilvusClient bound to the first reachable peer's LB."""
+    for ip in PEERS:
+        try:
+            c = MilvusClient(uri=f"http://{ip}:19537", timeout=timeout)
+            c.list_collections()                   # cheap reachability probe
+            return c
+        except Exception:
+            continue
+    raise RuntimeError(f"no peer in {PEERS} is reachable")
+
+client = connect_ha()
 
 # Create a collection with an HNSW index on the vector field
 schema = client.create_schema()
@@ -124,6 +141,11 @@ hits = client.search("docs", data=[[0.1] * 768], limit=5,
                      anns_field="vec",
                      search_params={"metric_type": "COSINE"})
 ```
+
+> **Even simpler**: put a single DNS name (`milvus.internal`) round-robin'd
+> across all peer IPs, or stick a real cloud LB / HAProxy / Caddy in front
+> with health checks, and use that one address in `MilvusClient(uri=...)`.
+> Then the fallback loop above isn't needed.
 
 **Failover-safe search pattern.** During topology changes (peer dies,
 upgrade running, etc.) Milvus may briefly return recovery-class errors

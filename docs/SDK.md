@@ -18,17 +18,55 @@ pymilvus.
 ## Connect
 
 Always connect to a peer's **nginx LB on port 19537**, not Milvus's
-direct port 19530. The LB routes around dead peers; the direct port
-doesn't.
+direct port 19530. The LB routes around dead Milvus backends; the
+direct port doesn't.
+
+**Important — every peer runs its own nginx LB.** They're equivalent
+endpoints, not "primary + replicas". Once you hand pymilvus a URI,
+the nginx on THAT peer routes to a healthy Milvus across the whole
+cluster. But if THAT peer itself dies (VM-down, kernel panic, network
+partition), the connection breaks even though the rest of the cluster
+is fine. The realistic HA pattern is a small client-side helper that
+tries each peer's LB in order:
 
 ```python
 from pymilvus import MilvusClient
 
-# Pick ANY peer's IP. nginx round-robins to a healthy backend.
-# For HA: list all peers in your config and the client picks one.
-client = MilvusClient(uri="http://10.0.0.10:19537")
+PEERS = ["10.0.0.10", "10.0.0.11", "10.0.0.12"]   # any/all peer IPs
+
+def connect_ha(timeout=5):
+    """Return a MilvusClient bound to the first reachable peer's LB."""
+    for ip in PEERS:
+        try:
+            c = MilvusClient(uri=f"http://{ip}:19537", timeout=timeout)
+            c.list_collections()                   # cheap reachability probe
+            return c
+        except Exception:
+            continue
+    raise RuntimeError(f"no peer in {PEERS} is reachable")
+
+client = connect_ha()
 print(client.get_server_version())
-print(client.list_collections())
+```
+
+### Even simpler: one address, real LB in front
+
+If you don't want to ship a peer list to every app, put one of these
+in front of all peers and point pymilvus at the single address:
+
+| Option | What you get | Trade-off |
+|---|---|---|
+| **DNS round-robin** (`milvus.internal` → A records for every peer IP) | Zero extra infra. App uses one URI. | Bad clients cache the first IP and don't re-resolve on failure. pymilvus is OK in practice but not bulletproof. |
+| **External L4 LB** (cloud LB, HAProxy, Caddy in TCP mode) | Real health checks; clients see one stable IP. | One more service to run. |
+| **kube-style headless service** (only if peers are on a Kubernetes cluster — but then why are you using milvus-onprem?) | gRPC clients re-resolve on failure. | Requires k8s, defeats the purpose of this project. |
+
+For most ops the **DNS round-robin** path is good enough — clients
+running pymilvus retry on connection failure naturally, and the next
+DNS lookup picks a different IP.
+
+```python
+# After setting up DNS:  milvus.internal → {peer1, peer2, peer3} A records
+client = MilvusClient(uri="http://milvus.internal:19537")
 ```
 
 ## Create a collection
