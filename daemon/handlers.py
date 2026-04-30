@@ -400,9 +400,18 @@ class TopologyHandlers:
             )
             return
 
+        # `--remove-orphans` cleans up any container with the compose
+        # project label that's no longer in the rendered compose file.
+        # On the OLD pulsar host (this peer becomes a non-pulsar peer
+        # post-migrate), the new render dropped the `pulsar` service,
+        # so the previously-managed milvus-pulsar container becomes
+        # an orphan. Without --remove-orphans it sits around forever
+        # accepting writes nobody reads. With --remove-orphans, compose
+        # prunes it as part of the same up call. Safe on the NEW pulsar
+        # host too (no orphans expected, --remove-orphans is a no-op).
         cmd = (
             f"docker compose {compose_arg} up -d --force-recreate "
-            f"--no-deps {' '.join(to_recreate)}"
+            f"--remove-orphans --no-deps {' '.join(to_recreate)}"
         )
         rc, out, err = await _run(cmd)
         if rc != 0:
@@ -464,12 +473,15 @@ class TopologyHandlers:
         # Followers in sorted node-N order so behavior is deterministic.
         from .joining import _node_sort_key
 
+        followers: list[tuple[str, str]] = []
         for name in sorted(self._topology.peers, key=_node_sort_key):
             info = self._topology.peers.get(name) or {}
             ip = info.get("ip")
             if not ip or ip == self._cfg.local_ip:
                 continue
+            followers.append((name, ip))
 
+        async def _rpc_one(name: str, ip: str) -> None:
             url = f"http://{ip}:{self._cfg.listen_port}/recreate-minio-self"
             log.info("rolling MinIO recreate: -> %s @ %s", name, ip)
             try:
@@ -491,6 +503,36 @@ class TopologyHandlers:
                     log.info("rolling MinIO recreate: %s done", name)
             except Exception as e:
                 log.warning("rolling MinIO recreate: %s errored: %s", name, e)
+
+        if kind == "REMOVED":
+            # Parallel for REMOVED (decommission flow). Sequential leaves
+            # a vulnerability window between "decommission complete" and
+            # "this survivor's MinIO recreated with the new compose":
+            # any healthcheck-triggered docker restart in that window
+            # picks up the OLD container spec (still listing the
+            # decommissioned pool) and crashloops with "pool decommissioned,
+            # please remove from server command line". On slow disks the
+            # window can be 60s+. Parallelizing finishes the recreate
+            # cycle in the time of one peer instead of N peers, so the
+            # window is bounded by the SLOWEST single recreate, not the
+            # SUM. Cluster-wide brief MinIO blip is acceptable during
+            # remove-node — there's no in-flight bootstrap to race with.
+            log.info(
+                "rolling MinIO recreate: kind=REMOVED — running %d "
+                "follower(s) in parallel to close decommission race window",
+                len(followers),
+            )
+            await asyncio.gather(
+                *(_rpc_one(n, ip) for n, ip in followers),
+                return_exceptions=True,
+            )
+        else:
+            # Sequential for ADDED (joins) and any other kinds — keeps
+            # cluster-wide MinIO impact minimal during grow operations
+            # where a joiner may still be mid-bootstrap and racing
+            # multiple recreates would compound rather than resolve.
+            for name, ip in followers:
+                await _rpc_one(name, ip)
 
         log.info("rolling MinIO recreate: complete")
 
