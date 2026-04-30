@@ -166,6 +166,62 @@ print(c.list_collections())
 
 `./milvus-onprem urls` prints all four reachable URLs at any time.
 
+### First insert + search (copy-paste-able)
+
+The end-to-end "I can search vectors now" path takes 5 calls:
+
+```python
+from pymilvus import MilvusClient, DataType
+import random
+
+c = MilvusClient(uri="http://10.0.0.10:19537")    # any peer's LB
+
+# 1. Schema + index — declared together
+schema = c.create_schema()
+schema.add_field("id",  DataType.INT64,        is_primary=True)
+schema.add_field("vec", DataType.FLOAT_VECTOR, dim=128)
+idx = c.prepare_index_params()
+idx.add_index("vec", index_type="HNSW", metric_type="COSINE")
+c.create_collection("demo", schema=schema, index_params=idx)
+
+# 2. Load with replicas spread across peers — replica_number=3 needs >= 3 peers
+c.load_collection("demo", replica_number=3)
+
+# 3. Insert + flush
+rows = [{"id": i, "vec": [random.random() for _ in range(128)]}
+        for i in range(1000)]
+c.insert("demo", rows)
+c.flush("demo")
+
+# 4. Search
+hits = c.search("demo", data=[[0.5] * 128], limit=5,
+                anns_field="vec",
+                search_params={"metric_type": "COSINE"})
+print(hits)
+```
+
+### Failover-safe reads (recommended for production apps)
+
+During topology changes (peer dies, upgrade running, auto-migrate-pulsar
+firing), Milvus may briefly return recovery-class errors like
+`no available shard leaders` or `index not found`. Wrap reads in the
+shipped retry helper:
+
+```python
+import sys; sys.path.insert(0, "test/tutorial")
+from _shared import retry_on_recovering
+
+hits = retry_on_recovering(lambda: c.search(...), max_wait_s=240)
+```
+
+`max_wait_s=240` covers the worst-case shard-leader failover window
+on 2.6 distributed (~60-180s on a busy cluster). For 2.5 the typical
+window is ~15-20s; default 120 is fine.
+
+For a 10-step pymilvus walkthrough (insert, load, search, filter,
+mutate, inspect, replication-prove, cleanup), see
+[`test/tutorial/`](../test/tutorial/).
+
 ## Add a 4th node later
 
 ```bash
@@ -180,6 +236,20 @@ That's it. Same `join` command as the original peers. The daemon:
 - triggers a sequenced rolling MinIO recreate (~30s/peer, no
   cluster-wide blip — only one MinIO down at a time)
 - m4 joins; nginx upstreams update; cluster size = 4
+
+### Different data path on this peer? Use `--data-root`
+
+If the new peer has a different mount layout from the others (e.g.
+fast NVMe at `/mnt/nvme` instead of `/data`), pass `--data-root`:
+
+```bash
+./milvus-onprem join 10.0.0.10:19500 <CLUSTER_TOKEN> --data-root=/mnt/nvme
+```
+
+That peer will store its etcd / MinIO / Milvus / Pulsar data under the
+override path. Other peers keep `/data`. Override survives all topology
+changes (rotate-token, remove-node, upgrade) and `teardown` correctly
+wipes the right path on each peer.
 
 ## What now?
 

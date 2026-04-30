@@ -93,19 +93,66 @@ rolling MinIO recreate, and nginx reload automatically.
 For the full walkthrough with hardware-validated outputs:
 **[docs/TUTORIAL.md](docs/TUTORIAL.md)**.
 
+## Use it from your app (pymilvus)
+
+Once the cluster's up, your app code is the same as any other Milvus
+deploy — point pymilvus at any peer's `:19537` (the LB) and you're
+done:
+
+```python
+from pymilvus import MilvusClient, DataType
+
+# Connect to ANY peer's nginx LB. nginx routes around dead peers
+# automatically — no failover code needed in your app.
+client = MilvusClient(uri="http://10.0.0.10:19537")
+
+# Create a collection with an HNSW index on the vector field
+schema = client.create_schema()
+schema.add_field("id",  DataType.INT64,        is_primary=True)
+schema.add_field("vec", DataType.FLOAT_VECTOR, dim=768)
+idx = client.prepare_index_params()
+idx.add_index("vec", index_type="HNSW", metric_type="COSINE")
+client.create_collection("docs", schema=schema, index_params=idx)
+
+# Load with replicas across peers (replica_number=3 → spread on 3 peers
+# for HA; 1 if you don't care about query failover)
+client.load_collection("docs", replica_number=3)
+
+# Insert + search are vanilla pymilvus
+client.insert("docs", [{"id": 1, "vec": [0.1] * 768}])
+hits = client.search("docs", data=[[0.1] * 768], limit=5,
+                     anns_field="vec",
+                     search_params={"metric_type": "COSINE"})
+```
+
+**Failover-safe search pattern.** During topology changes (peer dies,
+upgrade running, etc.) Milvus may briefly return recovery-class errors
+like `no available shard leaders`. Wrap reads in a small retry helper
+— one ships at [`test/tutorial/_shared.py`](test/tutorial/_shared.py):
+
+```python
+from _shared import retry_on_recovering
+hits = retry_on_recovering(lambda: client.search(...), max_wait_s=240)
+```
+
+For a 10-step pymilvus walkthrough (insert, load, search, filter,
+mutate, inspect, etc.), see [`test/tutorial/`](test/tutorial/).
+
 ## CLI
 
 Every operator action is one `./milvus-onprem <command>`. Common ones:
 
 ```bash
-./milvus-onprem preflight                             # pre-deploy sanity check
-./milvus-onprem init --mode=distributed               # set up this node
-./milvus-onprem join <leader-ip>:19500 <token>        # join an existing cluster
-./milvus-onprem status                                # local + peer health
-./milvus-onprem smoke                                 # functional test
+./milvus-onprem preflight                                    # pre-deploy sanity check
+./milvus-onprem init --mode=distributed --data-root=/data    # bootstrap node
+./milvus-onprem join <leader-ip>:19500 <token>               # join an existing cluster
+./milvus-onprem join <leader-ip>:19500 <token> --data-root=/mnt/nvme  # join with per-peer data path
+./milvus-onprem status                                       # local + peer health
+./milvus-onprem smoke                                        # functional test
 ./milvus-onprem create-backup --name=daily_2026_04_29
 ./milvus-onprem upgrade --milvus-version=v2.6.12
 ./milvus-onprem remove-node --ip=<peer>
+./milvus-onprem migrate-pulsar --to=node-2                   # 2.5 only — move Pulsar singleton
 ./milvus-onprem rotate-token
 ```
 
@@ -149,6 +196,16 @@ angle. Useful as a transient state during scale-out.
 
 ## Documentation index
 
+**App developers (use the cluster from your app):**
+
+| Read this | When |
+|---|---|
+| **[docs/SDK.md](docs/SDK.md)** | **Start here.** One-page guide: connect, schema, load, search, retry pattern. Copy-pasteable. |
+| [test/tutorial/](test/tutorial/) | 10-step pymilvus walkthrough — one tiny script per concept. |
+| [docs/FAILOVER.md](docs/FAILOVER.md) | What your app sees when a peer dies + the retry pattern that hides it. |
+
+**Operators (deploy and run the cluster):**
+
 | Read this | When |
 |---|---|
 | **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)** | **First-time deploy.** Prerequisites, install, init, join, smoke. ~15 min. |
@@ -157,11 +214,9 @@ angle. Useful as a transient state during scale-out.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the components fit together. Read this when something surprises you. |
 | [docs/CONFIG.md](docs/CONFIG.md) | `cluster.env` reference. Every variable, every default. |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-2 ops: backup, scale-out, status, alert formats. |
-| [docs/FAILOVER.md](docs/FAILOVER.md) | What happens when a node dies. 2.5 vs 2.6 behavior + retry pattern. |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → fix table. Real bugs we've actually hit. |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → fix table. Real bugs we've actually hit + cloud firewall rules. |
 | [docs/CONTROL_PLANE.md](docs/CONTROL_PLANE.md) | Daemon architecture: leader election, jobs, watchdog. |
 | [daemon/README.md](daemon/README.md) | Per-file walkthrough of the Python daemon. |
-| [test/tutorial/README.md](test/tutorial/README.md) | 10-step pymilvus walkthrough for app developers. |
 
 
 ## License

@@ -154,6 +154,7 @@ printed by `init` (or fetch it from any peer's cluster.env).
 |---|---|
 | `--resume` | Resume a partial join (network dropped mid-fetch, etc.). Picks up from the last completed step. |
 | `--local-ip=IP` | Override the auto-detected local IP. |
+| `--data-root=PATH` | **Per-peer DATA_ROOT override.** The leader-issued cluster.env carries the leader's `DATA_ROOT` (default `/data`). Use this on a peer with a different mount layout (e.g. `--data-root=/mnt/nvme` on a peer with fast local NVMe). The override is persisted in this peer's local cluster.env and survives all topology changes (rotate-token, remove-node, re-join, upgrade). Path must be absolute and not under `/proc`, `/sys`, `/dev`. |
 | `--skip-preflight` | Skip the auto-run preflight check. |
 
 The daemon orchestrates everything: assigns a `node-N` name, writes
