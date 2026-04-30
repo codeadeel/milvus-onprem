@@ -69,6 +69,41 @@ class DaemonConfig(BaseSettings):
         description="Max auto-restarts per container in the loop-window.",
     )
 
+    # Pulsar-host auto-failover. 2.5 only — Pulsar is the messagebus
+    # singleton and its host going down stops the whole cluster's reads
+    # AND writes. When this flag is true AND the watchdog detects the
+    # current PULSAR_HOST is down (PEER_DOWN_ALERT fired), the leader
+    # automatically submits a `migrate-pulsar` job to move Pulsar onto
+    # the next eligible surviving peer.
+    #
+    # DEFAULT FALSE because:
+    #   - migrate-pulsar drops in-flight Pulsar messages (writes mid-
+    #     flight when Pulsar dies are LOST). Operators must accept this
+    #     trade-off explicitly.
+    #   - A flapping peer (network blip) could trigger an unnecessary
+    #     migrate. We require `auto_migrate_pulsar_threshold` (default
+    #     30 = ~5 minutes at the default 10s interval) consecutive misses
+    #     before triggering, which is much more conservative than the
+    #     PEER_DOWN_ALERT threshold (default 6 = 1 minute).
+    auto_migrate_pulsar_on_host_failure: bool = Field(
+        default=False,
+        description=(
+            "If true (and MQ_TYPE=pulsar), the daemon auto-fires "
+            "migrate-pulsar when the watchdog detects the current "
+            "PULSAR_HOST is persistently down. Default false because "
+            "migrate-pulsar drops in-flight messages."
+        ),
+    )
+    auto_migrate_pulsar_threshold: int = Field(
+        default=30,
+        description=(
+            "Consecutive watchdog misses on the PULSAR_HOST peer before "
+            "auto-migrate fires. Default 30 = ~5 min at 10s interval. "
+            "Much higher than watchdog_peer_failure_threshold so a "
+            "transient network blip doesn't drop Pulsar."
+        ),
+    )
+
     # Job retention.
     jobs_retention_s: int = Field(
         default=30 * 24 * 3600,

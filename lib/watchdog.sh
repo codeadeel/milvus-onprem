@@ -1,22 +1,31 @@
 # =============================================================================
-# lib/watchdog.sh — alert-only peer-down watchdog
+# lib/watchdog.sh — alert-only peer-down watchdog (LEGACY / OPTIONAL)
+#
+# This is the LEGACY shell-based watchdog from the pre-control-plane era.
+# In a distributed deploy the control-plane daemon runs its own watchdog
+# (daemon/watchdog.py) which:
+#   - polls local containers every 10s and DOES auto-restart unhealthy
+#     ones when WATCHDOG_MODE=auto (default), with a 3-restart loop guard
+#   - polls peer reachability and emits PEER_DOWN_ALERT / PEER_UP_ALERT
+# So in distributed mode this script is unused.
+#
+# Standalone-mode operators who still want peer-down alerts (e.g., from
+# a script running outside the deploy) can run `milvus-onprem watchdog`
+# which sources this file. It only emits PEER_DOWN / PEER_UP — there's no
+# remediation here because cross-host docker actions need the daemon
+# anyway. For the auto-restart behavior, use a distributed deploy.
 #
 # Polls every PEER ip in PEER_IPS on WATCHDOG_INTERVAL_S (default 5s).
 # A peer is "down" when its Milvus TCP port is unreachable. After
 # WATCHDOG_FAILURE_THRESHOLD consecutive failures (default 6 → 30s on
 # the default interval) we emit a single-line `PEER_DOWN_ALERT` to
-# stdout, suitable for `journalctl -u milvus-watchdog | grep PEER_`.
-# When the peer comes back we emit a matching `PEER_UP_ALERT` once.
+# stdout. When the peer comes back we emit a matching `PEER_UP_ALERT`.
 #
 # Modes (set via WATCHDOG_MODE in cluster.env):
 #   monitor (default) — alert only, do nothing else.
-#   auto              — same as monitor for now; reserved for future
-#                       auto-recovery, but we deliberately do NOT take
-#                       any failover action yet (safe default).
-#
-# This is the long-running ExecStart for milvus-watchdog.service. It
-# never returns under normal operation; systemd's Restart=always
-# handles transient flakes.
+#   auto              — same as monitor in this LEGACY script. The real
+#                       auto-recovery lives in daemon/watchdog.py and
+#                       fires automatically in distributed mode.
 # =============================================================================
 
 [[ -n "${_WATCHDOG_SH_LOADED:-}" ]] && return 0

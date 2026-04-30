@@ -132,6 +132,16 @@ _env_apply_defaults() {
   : "${WATCHDOG_RESTART_LOOP_WINDOW_S:=300}"
   : "${WATCHDOG_RESTART_LOOP_MAX:=3}"
 
+  # Auto-migrate-pulsar on PULSAR_HOST persistent failure — 2.5 only.
+  # Default false because migrate-pulsar drops in-flight Pulsar
+  # messages (writes the broker hadn't acked are LOST). Set to true
+  # in cluster.env to opt in. Threshold: consecutive watchdog misses
+  # (default 30 = ~5 min at the 10s tick) before auto-migrate fires
+  # — much higher than WATCHDOG_PEER_FAILURE_THRESHOLD so a network
+  # blip doesn't drop Pulsar.
+  : "${AUTO_MIGRATE_PULSAR_ON_HOST_FAILURE:=false}"
+  : "${AUTO_MIGRATE_PULSAR_THRESHOLD:=30}"
+
   # nginx upstream tunings — exposed so operators on flaky LANs / WAN
   # can lift them without editing the template. Defaults are the
   # values we shipped originally (max_fails=3, fail_timeout=30s).

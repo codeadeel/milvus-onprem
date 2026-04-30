@@ -224,15 +224,40 @@ class LocalComponentWatchdog:
 
 class PeerReachabilityWatchdog:
     """TCP-probes every peer's control-plane port and emits PEER_DOWN /
-    PEER_UP alerts. No remediation — alerts only."""
+    PEER_UP alerts. Optionally auto-migrates the 2.5 Pulsar singleton
+    off a persistently-down host (opt-in via
+    `auto_migrate_pulsar_on_host_failure`).
 
-    def __init__(self, cfg: DaemonConfig, topology):
+    The auto-migrate path only fires when ALL of:
+      - this peer is the cluster leader (only one peer makes the call)
+      - cluster.env shows MQ_TYPE=pulsar (2.5 deploys)
+      - the down peer's name == cluster.env's PULSAR_HOST
+      - opt-in flag is true
+      - the peer has been down for at least
+        `auto_migrate_pulsar_threshold` consecutive ticks (default 30
+        ≈ 5 min, much longer than the standard PEER_DOWN_ALERT
+        threshold to avoid flap-induced migrations)
+
+    On firing, submits a `migrate-pulsar` job picking the next
+    surviving peer (sorted node-N order, excluding the down peer).
+    Marks the peer as "migrated-while-down" so subsequent ticks of
+    the same outage don't re-fire."""
+
+    def __init__(self, cfg: DaemonConfig, topology, leader=None, jobs_mgr=None):
         """Take the topology mirror so the peer list stays current as
-        the cluster grows / shrinks. Excludes self from probing."""
+        the cluster grows / shrinks. Excludes self from probing.
+
+        leader and jobs_mgr are optional — only needed for the
+        auto-migrate-pulsar feature. Pass None in standalone or
+        when the feature is unwanted; the watchdog still emits
+        the alerts either way."""
         self._cfg = cfg
         self._topology = topology
+        self._leader = leader
+        self._jobs_mgr = jobs_mgr
         self._consecutive_misses: dict[str, int] = defaultdict(int)
         self._down_since: dict[str, float] = {}
+        self._migrated_while_down: set[str] = set()
         self._stop = asyncio.Event()
 
     async def stop(self) -> None:
@@ -275,6 +300,11 @@ class PeerReachabilityWatchdog:
                         f"was_down_for_s={int(time.time() - down_since)}"
                     )
                 self._consecutive_misses[name] = 0
+                # Clear the auto-migrate "fired" flag if the peer recovers.
+                # (If the operator wants to migrate Pulsar BACK they can
+                # do it manually; we don't auto-migrate-back to avoid
+                # write-loss-on-bounce ping-pong.)
+                self._migrated_while_down.discard(name)
             else:
                 self._consecutive_misses[name] += 1
                 if (
@@ -286,6 +316,94 @@ class PeerReachabilityWatchdog:
                         f"PEER_DOWN_ALERT ts={_now()} node={name} ip={ip} "
                         f"consecutive_failures={self._consecutive_misses[name]}"
                     )
+
+                # Auto-migrate-pulsar gate. All conditions must hold;
+                # if any is false this is a no-op for this tick.
+                if (
+                    self._cfg.auto_migrate_pulsar_on_host_failure
+                    and self._leader is not None
+                    and self._jobs_mgr is not None
+                    and self._leader.is_leader
+                    and name not in self._migrated_while_down
+                    and self._consecutive_misses[name]
+                    >= self._cfg.auto_migrate_pulsar_threshold
+                ):
+                    try:
+                        await self._maybe_auto_migrate_pulsar(name, ip)
+                    except Exception as e:
+                        log.exception(
+                            "auto-migrate-pulsar consideration for %s "
+                            "errored: %s — will retry on next tick", name, e,
+                        )
+
+    async def _maybe_auto_migrate_pulsar(self, down_name: str, down_ip: str) -> None:
+        """Submit a migrate-pulsar job if this watchdog has confirmed the
+        current PULSAR_HOST is persistently down. Caller has already
+        verified the leadership + opt-in + threshold gates."""
+        # Lazy imports — keep the watchdog module load free of these
+        # if the feature isn't enabled.
+        from .workers.remove_node import _read_cluster_env_value
+        from .joining import _node_sort_key
+
+        mq_type = _read_cluster_env_value("MQ_TYPE", "")
+        if mq_type != "pulsar":
+            return  # 2.6 / Woodpecker — Pulsar singleton doesn't exist
+        current_pulsar_host = _read_cluster_env_value("PULSAR_HOST", "node-1")
+        if down_name != current_pulsar_host:
+            return  # The down peer isn't hosting Pulsar; no failover needed
+
+        # Pick the next eligible peer: first survivor in sorted node-N
+        # order excluding the down peer. Self is eligible (the leader
+        # may end up hosting Pulsar; that's normal). Skip peers without
+        # an IP in the topology mirror (transitional state).
+        survivors = sorted(
+            (n for n, info in self._topology.peers.items()
+             if n != down_name and info.get("ip")),
+            key=_node_sort_key,
+        )
+        if not survivors:
+            log.warning(
+                "auto-migrate-pulsar: PULSAR_HOST=%s down but no other "
+                "peers to migrate to — cluster is one peer", down_name,
+            )
+            return
+        target = survivors[0]
+
+        log.warning(
+            "auto-migrate-pulsar: PULSAR_HOST=%s @ %s has been down for "
+            "%d ticks (>= %d threshold) — submitting migrate-pulsar job "
+            "to %s. NOTE: in-flight Pulsar messages from this point will "
+            "be LOST (this is the documented behaviour of migrate-pulsar; "
+            "you opted in via auto_migrate_pulsar_on_host_failure=true).",
+            down_name, down_ip,
+            self._consecutive_misses[down_name],
+            self._cfg.auto_migrate_pulsar_threshold,
+            target,
+        )
+        # Mark BEFORE the job submission to avoid races on the next tick.
+        # If the submission fails we'll log + clear so the next tick can
+        # retry; otherwise leave it set so we don't re-submit while the
+        # peer stays down.
+        self._migrated_while_down.add(down_name)
+        try:
+            job = await self._jobs_mgr.create(
+                "migrate-pulsar", {"to_node": target}
+            )
+            _emit(
+                f"AUTO_MIGRATE_PULSAR ts={_now()} from={down_name} "
+                f"to={target} job_id={job.id}"
+            )
+            log.info(
+                "auto-migrate-pulsar: submitted job %s (from=%s to=%s)",
+                job.id, down_name, target,
+            )
+        except Exception as e:
+            log.warning(
+                "auto-migrate-pulsar: job submission failed (%s) — "
+                "clearing fired-flag so next tick can retry", e,
+            )
+            self._migrated_while_down.discard(down_name)
+            raise
 
 
 # ── helpers ──────────────────────────────────────────────────────────

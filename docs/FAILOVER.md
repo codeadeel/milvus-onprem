@@ -146,6 +146,54 @@ values closer to defaults. Edit the relevant `templates/<version>/
 milvus.yaml.tpl`, re-render with `milvus-onprem render`, and `up`
 to apply.
 
+## Auto-migrate Pulsar on host failure (2.5 only, opt-in)
+
+In 2.5 distributed mode the Pulsar broker is a singleton on
+`PULSAR_HOST`. When that peer dies, all Milvus reads AND writes stop
+— proxy can't even bootstrap without a working Pulsar. The manual
+fix is `./milvus-onprem migrate-pulsar --to=<other-peer>` BEFORE the
+host is shut down. For unplanned outages, the daemon can do this
+automatically.
+
+**Opt-in via `cluster.env`** (default off):
+
+```bash
+AUTO_MIGRATE_PULSAR_ON_HOST_FAILURE=true
+AUTO_MIGRATE_PULSAR_THRESHOLD=30   # ~5 min at the default 10s watchdog tick
+```
+
+When enabled, the leader's `PeerReachabilityWatchdog` watches every
+peer. If `PULSAR_HOST` misses `AUTO_MIGRATE_PULSAR_THRESHOLD`
+consecutive probes (default 30 = ~5 min, much longer than the
+60s `PEER_DOWN_ALERT` threshold to absorb network blips), the leader
+submits a `migrate-pulsar` job to move Pulsar onto the next-eligible
+surviving peer (sorted node-N order, lowest first). Emits a single-
+line audit log:
+
+```
+AUTO_MIGRATE_PULSAR ts=<unix> from=<down-name> to=<new-host> job_id=<uuid>
+```
+
+**Tradeoff — read this before enabling.** `migrate-pulsar` drops
+any Pulsar messages that were in-flight at the moment Pulsar died:
+writes the broker hadn't acknowledged are LOST. This is a property
+of the Pulsar singleton model, not of the auto-migrate feature
+itself. If your write path can't tolerate that, leave the flag
+false and use the manual `migrate-pulsar` command before planned
+shutdowns. For 2.6 (Woodpecker per-peer WAL) this whole class of
+failure mode doesn't exist — `MQ_TYPE=pulsar` is the gate, so on
+2.6 the flag is a no-op even if set.
+
+The flag is intentionally per-cluster, not per-peer — only the
+leader fires the migrate so cluster-wide one peer makes the call.
+After auto-migrate runs once for an outage, it's marked "fired"
+for that down-peer and won't re-fire until the original peer
+recovers (then the flag clears so a future outage of the new host
+can also auto-failover). The system does NOT auto-migrate-back
+when the original host returns — that would risk write-loss-on-
+bounce ping-pong; the operator can manually `migrate-pulsar` back
+if desired.
+
 ## Replica placement for HA
 
 Milvus's shard-leader assignment is per-shard, not per-collection.

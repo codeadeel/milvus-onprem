@@ -155,7 +155,9 @@ async def lifespan(app: FastAPI):
     # These observe and act locally; no leader gating — every daemon owns
     # remediation for its own node.
     local_watchdog = LocalComponentWatchdog(config)
-    peer_watchdog = PeerReachabilityWatchdog(config, topology)
+    peer_watchdog = PeerReachabilityWatchdog(
+        config, topology, leader=elector, jobs_mgr=jobs_mgr,
+    )
 
     # Job retention sweeper — only the leader prunes (etcd writes are
     # leader-funneled anyway), but every daemon checks via is_leader so
