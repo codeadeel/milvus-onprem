@@ -48,6 +48,40 @@ def check(cond, label, detail=""):
         FAIL += 1
 
 
+def _retry_on_transient(fn, *, max_wait_s=180, base_delay_s=2.0, max_delay_s=10.0):
+    """Call fn() and retry on Milvus's recovery-class errors.
+
+    The cluster briefly returns errors like 'collection on recovering',
+    'no available shard leaders', 'channel not available', 'node not
+    found', 'service unavailable: internal: Milvus Proxy is not ready
+    yet' during topology changes (post-remove-node, post-rotate-token,
+    post-failover). They settle within seconds. Bare smoke runs that
+    happen during the settle window fail spuriously without this; with
+    it, smoke is accurate against real cluster bugs and tolerant of
+    transient settling.
+
+    Re-raises the original exception if max_wait_s elapses, or
+    immediately if the exception isn't recovery-class.
+    """
+    from pymilvus.exceptions import MilvusException
+    transient = (
+        "recovering", "no available", "channel not available",
+        "channel checker not ready", "node not found",
+        "proxy is not ready",
+    )
+    deadline = time.monotonic() + max_wait_s
+    delay = base_delay_s
+    while True:
+        try:
+            return fn()
+        except MilvusException as e:
+            msg = str(e).lower()
+            if not any(p in msg for p in transient) or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(delay, max_delay_s))
+            delay = min(delay * 2, max_delay_s)
+
+
 def main():
     print("=" * 62)
     print(f" smoke-test.py")
@@ -103,12 +137,19 @@ def main():
     print(f"\n==> load (replica_number={REPLICAS})")
     t0 = time.time()
     try:
-        client.load_collection(COLL, replica_number=REPLICAS)
+        # Wrap in retry: post-topology-change settle (e.g. running smoke
+        # right after remove-node) can take 60-180s during which load
+        # transiently returns recovery-class errors.
+        _retry_on_transient(
+            lambda: client.load_collection(COLL, replica_number=REPLICAS)
+        )
         check(True, f"loaded with {REPLICAS} replicas in {time.time()-t0:.2f}s")
     except Exception as e:
         check(False, f"load with replica_number={REPLICAS}", str(e))
         print("    Retrying with replica_number=1...")
-        client.load_collection(COLL, replica_number=1)
+        _retry_on_transient(
+            lambda: client.load_collection(COLL, replica_number=1)
+        )
 
     print("\n==> ANN search (top-5)")
     q = np.random.rand(DIM).astype(np.float32); q = (q / np.linalg.norm(q)).tolist()
