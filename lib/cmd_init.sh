@@ -140,6 +140,24 @@ cmd_init() {
     fi
   fi
 
+  # Surviving etcd peers from a previous cluster — if any peer still has
+  # this host configured at https://<this>:2380 as their etcd peer, their
+  # raft processes will keep heartbeating us. A freshly-bootstrapped etcd
+  # has lastIndex=1 and panics on the first heartbeat carrying commit>1
+  # (`tocommit(N) is out of range [lastIndex(1)]`), then crashloops.
+  # Listen briefly on the etcd-peer-port and refuse if any non-local IP
+  # connects — that's a surviving peer's raft retry. Distributed only.
+  if [[ "$mode" == "distributed" && "$force" -ne 1 ]]; then
+    local _peer_etcd_port="${ETCD_PEER_PORT:-2380}"
+    local _stale_peers _rc=0
+    _stale_peers="$(_init_detect_stale_peer_heartbeats "$local_ip" "$_peer_etcd_port" 5)" || _rc=$?
+    case "$_rc" in
+      0) info "no surviving etcd peers detected on :$_peer_etcd_port" ;;
+      2) warn "couldn't bind :$_peer_etcd_port to check for stale peer heartbeats (port busy locally — preflight should have caught this); skipping BUG-C check" ;;
+      *) die "detected inbound etcd peer-protocol connections from: ${_stale_peers:-<unknown>} on :$_peer_etcd_port. Those peers still have this host configured as their etcd peer — once init brings up the new etcd, their raft heartbeats will panic it (\`tocommit out of range\`). Run \`./milvus-onprem teardown --full --force\` on each of those peers FIRST, then re-run init. (Pass \`--force\` to bypass — NOT recommended; the new etcd will crashloop within seconds.)" ;;
+    esac
+  fi
+
   # Default the Milvus image tag if not given.
   : "${milvus_image_tag:=v2.6.11}"
 
@@ -244,6 +262,73 @@ _gen_secret_key() {
   else
     head -c "$bytes" /dev/urandom | od -An -vtx1 | tr -d ' \n'
   fi
+}
+
+# Listen on the local etcd-peer-port for `duration` seconds and report
+# any non-loopback / non-self source IP that initiates a TCP connection
+# during that window. Used by init to detect surviving peers from a
+# previous cluster whose etcd processes still consider this host their
+# raft peer (BUG-C: their heartbeats will panic our fresh single-node
+# etcd within seconds with `tocommit out of range`).
+#
+# Returns 0 (and prints nothing) when no remote connections arrive.
+# Returns non-zero (and prints the comma-separated list of source IPs
+# to stdout) when at least one remote peer connects. On bind failure
+# (port already in use locally), returns non-zero with a synthetic
+# `<bind-failed>` token so the caller can surface a clear error.
+_init_detect_stale_peer_heartbeats() {
+  local local_ip="$1" port="$2" duration="${3:-5}"
+  python3 - "$local_ip" "$port" "$duration" <<'PYEOF'
+"""Bind to :port for `duration` seconds and report remote connect-attempts.
+
+Standalone helper invoked by lib/cmd_init.sh. Exits 0 with no output
+when only loopback/self contacts the port; exits 1 with a comma-
+separated list of distinct remote source IPs otherwise. On bind
+failure, exits 2 with the literal token `<bind-failed>` so the bash
+caller can distinguish setup errors from actual stale-peer hits.
+"""
+import socket, sys, time
+
+local_ip, port, duration = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+seen = set()
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(("0.0.0.0", port))
+except OSError:
+    sys.stdout.write("<bind-failed>")
+    sys.exit(2)
+s.listen(64)
+s.settimeout(0.25)
+
+deadline = time.monotonic() + duration
+try:
+    while time.monotonic() < deadline:
+        try:
+            conn, addr = s.accept()
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        src = addr[0]
+        if src not in ("127.0.0.1", local_ip, "0.0.0.0"):
+            seen.add(src)
+        try:
+            conn.close()
+        except OSError:
+            pass
+finally:
+    try:
+        s.close()
+    except OSError:
+        pass
+
+if seen:
+    sys.stdout.write(",".join(sorted(seen)))
+    sys.exit(1)
+sys.exit(0)
+PYEOF
 }
 
 # Build the control-plane daemon image. Always invoked; docker's layer
