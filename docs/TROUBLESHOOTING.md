@@ -116,6 +116,101 @@ FORCE_NODE_INDEX=N ./milvus-onprem init ...
 
 where N is the 1-based position of this node's IP in PEER_IPS.
 
+## Auth / CLUSTER_TOKEN issues
+
+### "I forgot the CLUSTER_TOKEN — how do I get it back to add a new peer?"
+
+The token isn't held in any external service — **it's stored as
+`CLUSTER_TOKEN=...` in `cluster.env` on every peer**. Pick any peer
+you can SSH into and grep:
+
+```bash
+ssh adeel@<any-peer> 'grep ^CLUSTER_TOKEN ~/milvus-onprem/cluster.env'
+# CLUSTER_TOKEN=f3a8c12d4e5b7a9061f2d3c4b5a6978d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b
+```
+
+Use that value with `./milvus-onprem join <leader-ip>:19500 <token>`.
+Every peer's `cluster.env` carries the same `CLUSTER_TOKEN` — if you
+rotated it via `rotate-token`, the file on every peer was updated
+atomically, so pulling from any one of them is fine.
+
+The token is **never written to etcd or any logs** — it stays in the
+`cluster.env` file (mode `0600`) and the daemon container's environment
+(via `MILVUS_ONPREM_CLUSTER_TOKEN`). That's by design: a cluster-token
+leak is a credential leak, so it isn't replicated to anywhere it can be
+read accidentally.
+
+### "I want to rotate it because the old one was leaked"
+
+```bash
+./milvus-onprem rotate-token --force
+# new token: a9633b37ffcfde5438000673af2e71884434db31f92a26e49bbba5affd218564
+```
+
+This atomically:
+1. Writes the new token to every peer's `cluster.env`
+2. Recreates every peer's `milvus-onprem-cp` daemon container (so the
+   old token stops working ~5-15s after the call returns)
+3. Verifies every peer accepts the new token before reporting OK
+
+Save the new token somewhere safe — it's printed once, then it's only
+in `cluster.env` again. The CLI also retries the per-peer auth probe
+3× with backoff so a peer whose daemon recreate landed at the tail end
+of the window doesn't false-fail.
+
+You can also pass an explicit token instead of letting the CLI
+generate one:
+
+```bash
+./milvus-onprem rotate-token --new-token=<your-32+-char-token>
+```
+
+### "I lost the token AND I can't SSH into ANY peer"
+
+Recovery requires console access to at least one VM (cloud provider
+web console, IPMI, etc.). Once you have shell on any peer:
+
+```bash
+grep ^CLUSTER_TOKEN ~/milvus-onprem/cluster.env
+```
+
+If you have **zero** access to any peer's filesystem at all, the
+cluster's existing token is unrecoverable from outside (this is the
+intended security property — there's no "reset password" backdoor).
+The fallback is destructive:
+
+```bash
+# On one peer (any console you can get):
+./milvus-onprem teardown --full --force
+./milvus-onprem init --mode=distributed              # generates a new token
+# then re-join the other peers from scratch — DATA WILL BE LOST
+```
+
+Take an `export-backup` to off-cluster storage routinely so this path
+is never the one you have to take.
+
+### `rotate-token` reports `1 peer(s) didn't accept the new token`
+
+Pre-fix this was a real flake; with the retry-3× behavior it's now
+rare. If it does fire:
+
+1. Run the printed retry command:
+   ```bash
+   ./milvus-onprem rotate-token --new-token=<value-from-error-message>
+   ```
+2. If the same peer keeps failing: check that peer's daemon health
+   ```bash
+   ssh adeel@<peer> 'docker ps --filter name=milvus-onprem-cp; docker logs --tail 30 milvus-onprem-cp'
+   ```
+3. Worst case — manually edit that peer's `cluster.env` to set
+   `CLUSTER_TOKEN=<new-value>` and recreate the daemon:
+   ```bash
+   ssh adeel@<peer> 'cd ~/milvus-onprem &&
+     sed -i "s|^CLUSTER_TOKEN=.*|CLUSTER_TOKEN=<new>|" cluster.env &&
+     docker compose --project-name <node-N> -f rendered/<node-N>/docker-compose.yml \
+       up -d --force-recreate --no-deps control-plane'
+   ```
+
 ## Scale-out issues
 
 ### `CLUSTER_SIZE=N invalid` after a `join`

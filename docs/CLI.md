@@ -185,6 +185,11 @@ verifies every peer accepts the new token before returning success.
 `--new-token` must be ≥ 32 chars. If verification fails, re-run with
 the same `--new-token` value to retry.
 
+> **Forgot the current token?** It's in `cluster.env` on every peer:
+> `grep ^CLUSTER_TOKEN ~/milvus-onprem/cluster.env` on any one of them.
+> See [TROUBLESHOOTING.md → Auth / CLUSTER_TOKEN issues](TROUBLESHOOTING.md#auth--cluster_token-issues)
+> for full recovery paths (including the no-SSH-access fallback).
+
 ### `remove-node`
 
 Gracefully remove a peer from the cluster: drain its MinIO pool, etcd
