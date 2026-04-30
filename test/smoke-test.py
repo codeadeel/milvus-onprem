@@ -68,6 +68,18 @@ def _retry_on_transient(fn, *, max_wait_s=180, base_delay_s=2.0, max_delay_s=10.
         "recovering", "no available", "channel not available",
         "channel checker not ready", "node not found",
         "proxy is not ready",
+        # Milvus's create_index inside create_collection is async; on
+        # heavily-loaded clusters (e.g. just after a topology change)
+        # load_collection can fire before the index is ready, returning
+        # `code=700: index not found`. Same retry-class — settles in
+        # seconds.
+        "index not found",
+        # Right after remove-node, queryCoord's metadata cache can lag
+        # the rootcoord by ~10s; a freshly-created collection may not
+        # be visible to LoadCollection yet (`code=65535: call query
+        # coordinator LoadCollection: collection not found
+        # [collection=<id>]`). Settles in seconds.
+        "collection not found",
     )
     deadline = time.monotonic() + max_wait_s
     delay = base_delay_s
