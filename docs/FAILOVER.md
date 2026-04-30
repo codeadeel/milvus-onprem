@@ -101,11 +101,15 @@ hits = retry_on_recovering(lambda: client.search(...))
 It only retries known recovery-class messages (`recovering`,
 `no available`, `channel not available`, `channel checker not ready`,
 `node not found`) and re-raises everything else, so real bugs still
-surface. Default budget is 120s. **Load-bearing on both 2.5 and 2.6
-distributed** — the worst-case shard whose delegator was on the dead
-peer can take ~60-180s for queryCoord to re-promote, so the retry
-budget needs to comfortably cover that. Bump to `budget_s=240` if
-your cluster has slow disks or many shards.
+surface. Default `max_wait_s=120`. **Load-bearing on both 2.5 and
+2.6 distributed** — the worst-case shard whose delegator was on the
+dead peer can take ~60-180s for queryCoord to re-promote, so the
+retry budget needs to comfortably cover that. Bump to
+`max_wait_s=240` if your cluster has slow disks or many shards:
+
+```python
+hits = retry_on_recovering(lambda: client.search(...), max_wait_s=240)
+```
 
 ## Server-side: tuning 2.5 and 2.6 for faster recovery
 

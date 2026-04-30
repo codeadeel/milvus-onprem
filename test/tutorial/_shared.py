@@ -28,12 +28,16 @@ def retry_on_recovering(fn, *, max_wait_s=120, base_delay_s=1.0, max_delay_s=10.
     Re-raises the original exception if max_wait_s elapses, or
     immediately if the exception is not a known recovery-class error
     (so real bugs surface instead of getting silently swallowed).
+
+    For 2.6 distributed: the worst-case shard whose delegator was on
+    the dead peer can take 60-180s for queryCoord to re-promote a
+    replica leader, so pass max_wait_s=240 there to comfortably cover.
     """
     import time
     from pymilvus.exceptions import MilvusException
 
     transient = ("recovering", "no available", "channel not available",
-                 "channel checker not ready")
+                 "channel checker not ready", "node not found")
     deadline = time.monotonic() + max_wait_s
     delay = base_delay_s
     while True:
