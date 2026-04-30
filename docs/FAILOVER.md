@@ -99,9 +99,13 @@ hits = retry_on_recovering(lambda: client.search(...))
 ```
 
 It only retries known recovery-class messages (`recovering`,
-`no available`, `channel not available`, `channel checker not ready`)
-and re-raises everything else, so real bugs still surface. Default
-budget is 120s. It's defense-in-depth on 2.6 but **load-bearing on 2.5**.
+`no available`, `channel not available`, `channel checker not ready`,
+`node not found`) and re-raises everything else, so real bugs still
+surface. Default budget is 120s. **Load-bearing on both 2.5 and 2.6
+distributed** — the worst-case shard whose delegator was on the dead
+peer can take ~60-180s for queryCoord to re-promote, so the retry
+budget needs to comfortably cover that. Bump to `budget_s=240` if
+your cluster has slow disks or many shards.
 
 ## Server-side: tuning 2.5 and 2.6 for faster recovery
 
@@ -117,9 +121,19 @@ queryCoord:
   heartbeatAvailableInterval: 5000  # was 10000 — shorter heartbeat window
 ```
 
-Effect: the recovery window after a peer outage drops from ~50s
-(untuned) to ~15-20s — both for 2.5's `code=106 collection on
-recovering` and 2.6's `code=503 no available shard leaders`.
+Effect on **2.5**: the `code=106 collection on recovering` window
+drops from ~50s untuned to ~15-20s in 3-node drills.
+
+Effect on **2.6 distributed**: most queries (those NOT on the
+specific shard whose delegator was on the dead peer) recover in the
+same ~5-15s window — the proxy stops sending to the dead querynode
+quickly. But for the worst-case shard (the one whose delegator was
+on the dead peer), Milvus 2.6's queryCoord delegator-reassignment is
+**not gated by these knobs** — `balanceIntervalSeconds` was tested
+and didn't move the needle. In 4-peer drills, that one shard's
+queries can return `code=503 no available shard leaders` for ~60-180s
+before queryCoord re-promotes a delegator on a healthy peer. The
+SDK retry pattern below is what makes this transparent to the app.
 
 **Tradeoff: tighter timeouts mean a higher chance of false-positive
 eviction under transient network jitter.** On a LAN with sub-ms

@@ -98,10 +98,16 @@ rootCoord:
 dataCoord:
   enableActiveStandby: true
 
-# queryCoord tunings: faster failure-detection so shard leaders get
-# reassigned to healthy querynodes after a peer dies. Same values
-# 2.5 ships; in 4-peer 2.6 chaos drills, this is what closes the
-# `no available shard leaders` window. See docs/FAILOVER.md.
+# queryCoord tunings: faster failure-detection so the cluster knows a
+# querynode is unavailable within ~5-10s instead of the upstream ~60s.
+# Same values 2.5 ships. Note: these tunings reduce *most* queries'
+# failure window — the proxy stops sending requests to the dead
+# querynode quickly. But they do NOT close the window for queries on
+# the specific shard whose delegator (shard leader) was on the dead
+# peer; queryCoord 2.6's delegator-reassignment isn't gated by these
+# knobs (no public knob found in Milvus 2.6.11 to accelerate it).
+# Worst-case shard recovery in 4-peer drills is ~60-180s. See
+# docs/FAILOVER.md for the SDK-side retry pattern that handles this.
 queryCoord:
   enableActiveStandby: true
   checkNodeSessionInterval: 10
