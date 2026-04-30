@@ -586,10 +586,17 @@ async def post_recreate_minio_self(request: Request) -> Any:
     Called by the leader's `_rolling_minio_recreate` sweep when topology
     changes. Auth-gated by the cluster bearer token; not meant for
     operators directly. Blocks until MinIO is healthy (or 90s timeout)
-    so the leader's rolling loop naturally waits between peers."""
+    so the leader's rolling loop naturally waits between peers.
+
+    Acquires the topology-handler lock so this can't race the
+    watcher-driven handler if both fire on the same node for
+    overlapping events. (See post_upgrade_self for the same
+    reasoning — concurrent docker compose up --force-recreate on
+    the same containers returns rc=1.)"""
     handlers = request.app.state.handlers
     try:
-        await handlers.recreate_minio_local()
+        async with handlers._lock:
+            await handlers.recreate_minio_local()
         # The local recreate has already waited for healthy; if it
         # returned, MinIO is healthy on this node.
         return RecreateMinioSelfResponse(healthy=True, error=None)
@@ -617,7 +624,15 @@ async def post_upgrade_self(req: UpgradeSelfRequest, request: Request) -> Any:
     Auth-gated by the cluster bearer token; not meant to be called
     by operators directly. The peer-to-peer model exists because
     Docker doesn't expose remote control without out-of-band auth
-    (TLS + mTLS, which we deliberately avoid in v1.2)."""
+    (TLS + mTLS, which we deliberately avoid in v1.2).
+
+    Acquires the topology-handler lock before doing any work, so an
+    upgrade can't race a watcher-driven `docker compose up
+    --force-recreate` for the same milvus services. Without the
+    lock, two concurrent compose invocations on the same containers
+    return rc=1 (one sees the other's stop in flight) and the
+    upgrade reports a false-positive failure even though the end
+    state is correct (containers ARE on the new tag)."""
     # Lazy import: avoids a daemon → workers → daemon cycle at module load.
     from .workers.version_upgrade import upgrade_self
 
@@ -626,8 +641,10 @@ async def post_upgrade_self(req: UpgradeSelfRequest, request: Request) -> Any:
     def writer(line: str) -> None:
         captured.append(line.rstrip("\n"))
 
+    handlers = request.app.state.handlers
     try:
-        await upgrade_self(writer, req.milvus_version)
+        async with handlers._lock:
+            await upgrade_self(writer, req.milvus_version)
         return UpgradeSelfResponse(log=captured, error=None)
     except Exception as e:
         log.exception("upgrade-self failed")
