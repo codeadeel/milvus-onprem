@@ -116,19 +116,40 @@ async def run_migrate_pulsar(ctx: JobContext) -> None:
     )
     ctx.progress_setter(0.05)
 
+    # `force_when_old_host_dead` lets the auto-migrate-pulsar feature
+    # in the watchdog tolerate the OLD pulsar host being unreachable
+    # (the entire reason auto-migrate fires is that the host is dead).
+    # When set, the preflight allows the old-host to be unreachable
+    # but still requires every OTHER peer; the apply skips the dead
+    # old host's sync-pulsar-host call (it's gone anyway); the post-
+    # verify excludes the dead old host.
+    force_when_old_host_dead = bool(
+        ctx.job.params.get("force_when_old_host_dead", False)
+    )
+
     # Step 2 — PREFLIGHT. Every peer must be reachable. We refuse to
     # start a migration that we know will leave the cluster split.
     unreachable = await _preflight_peers_reachable(
         peers, config.cluster_token, config.listen_port
     )
-    if unreachable:
+    # unreachable items are formatted "<name>@<ip>"; pull just the names.
+    unreachable_names = [u.split("@", 1)[0] for u in unreachable]
+    if force_when_old_host_dead and unreachable_names == [current_host]:
+        ctx.log_writer(
+            f"preflight: only the OLD pulsar host {current_host} is "
+            f"unreachable; force_when_old_host_dead=true so the migration "
+            f"proceeds (the dead host's sync-pulsar-host call will be "
+            f"skipped, and post-verify excludes it)"
+        )
+    elif unreachable:
         raise RuntimeError(
             f"preflight: cannot reach daemon on {len(unreachable)} "
             f"peer(s): {unreachable}. Migration aborted before any "
             f"side effects. Wait for `./milvus-onprem status` to "
             f"report all peers reachable, then retry."
         )
-    ctx.log_writer(f"preflight: all {len(peers)} peers reachable")
+    else:
+        ctx.log_writer(f"preflight: all {len(peers)} peers reachable")
     ctx.progress_setter(0.10)
 
     # Step 3 — APPLY. Order matters: bring up Pulsar on the new host
@@ -142,9 +163,14 @@ async def run_migrate_pulsar(ctx: JobContext) -> None:
         ip = (peers.get(name) or {}).get("ip", "")
         if ip:
             sequenced.append(("milvus-only peer", name, ip))
-    if current_ip:
+    if current_ip and not (force_when_old_host_dead and current_host in unreachable_names):
         sequenced.append(
             ("old pulsar host (now milvus-only)", current_host, current_ip)
+        )
+    elif force_when_old_host_dead and current_host in unreachable_names:
+        ctx.log_writer(
+            f"skipping apply on dead old pulsar host {current_host} "
+            f"(force_when_old_host_dead)"
         )
 
     progress_step = 0.70 / max(1, len(sequenced))
@@ -177,10 +203,20 @@ async def run_migrate_pulsar(ctx: JobContext) -> None:
     # Step 4 — POST-VERIFY. Read every peer's currently-applied
     # PULSAR_HOST and confirm everyone is on the new value. Catches
     # the path where a sync-pulsar-host returned 200 but the actual
-    # cluster.env write didn't take.
+    # cluster.env write didn't take. When force_when_old_host_dead is
+    # set, exclude the dead old host (it's not reachable to verify;
+    # we'll fix its cluster.env when it comes back via the regular
+    # topology-change machinery + a manual re-sync if needed).
     ctx.log_writer("post-verify: confirming PULSAR_HOST on every peer")
+    verify_peers = peers
+    if force_when_old_host_dead and current_host in unreachable_names:
+        verify_peers = {n: i for n, i in peers.items() if n != current_host}
+        ctx.log_writer(
+            f"post-verify excludes dead old host {current_host} "
+            f"(force_when_old_host_dead)"
+        )
     mismatches = await _verify_pulsar_host_everywhere(
-        peers, to_node, config.cluster_token, config.listen_port
+        verify_peers, to_node, config.cluster_token, config.listen_port
     )
     if mismatches:
         raise RuntimeError(

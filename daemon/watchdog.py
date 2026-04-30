@@ -345,7 +345,18 @@ class PeerReachabilityWatchdog:
         from .workers.remove_node import _read_cluster_env_value
         from .joining import _node_sort_key
 
+        # MQ_TYPE is derived at runtime from MILVUS_IMAGE_TAG by
+        # lib/env.sh — it's NOT written to cluster.env (only present as
+        # a commented-out template line). Reading MQ_TYPE directly
+        # would always return empty. Derive the same way: 2.5 -> pulsar,
+        # everything else -> woodpecker.
         mq_type = _read_cluster_env_value("MQ_TYPE", "")
+        if not mq_type:
+            tag = _read_cluster_env_value("MILVUS_IMAGE_TAG", "")
+            if tag.startswith("v2.5"):
+                mq_type = "pulsar"
+            else:
+                mq_type = "woodpecker"
         if mq_type != "pulsar":
             return  # 2.6 / Woodpecker — Pulsar singleton doesn't exist
         current_pulsar_host = _read_cluster_env_value("PULSAR_HOST", "node-1")
@@ -387,7 +398,8 @@ class PeerReachabilityWatchdog:
         self._migrated_while_down.add(down_name)
         try:
             job = await self._jobs_mgr.create(
-                "migrate-pulsar", {"to_node": target}
+                "migrate-pulsar",
+                {"to_node": target, "force_when_old_host_dead": True},
             )
             _emit(
                 f"AUTO_MIGRATE_PULSAR ts={_now()} from={down_name} "
