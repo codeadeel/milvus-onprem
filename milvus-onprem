@@ -24,6 +24,7 @@ source "$REPO_ROOT/lib/minio.sh"
 source "$REPO_ROOT/lib/host.sh"
 source "$REPO_ROOT/lib/backup.sh"
 source "$REPO_ROOT/lib/watchdog.sh"
+source "$REPO_ROOT/lib/cp.sh"
 
 # Source every cmd_*.sh — each contributes a single command.
 for f in "$REPO_ROOT"/lib/cmd_*.sh; do

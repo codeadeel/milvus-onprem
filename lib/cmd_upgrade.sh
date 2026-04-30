@@ -94,11 +94,7 @@ print(json.dumps({'type':'version-upgrade','params':{'milvus_version':'$target'}
 
   info "==> POST /jobs (version-upgrade -> $target) on $cp_url"
   local resp
-  resp=$(curl -fsS --location-trusted --max-time 30 \
-    -H "Authorization: Bearer $token" \
-    -H "Content-Type: application/json" \
-    -d "$body" "$cp_url/jobs") \
-    || die "POST /jobs failed — daemon unreachable?"
+  resp=$(cp_post_job "$cp_url/jobs" "$token" "$body")
   local job_id
   job_id=$(printf '%s' "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
   ok "job created: $job_id"

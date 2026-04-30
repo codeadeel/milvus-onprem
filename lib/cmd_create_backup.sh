@@ -171,11 +171,7 @@ print(json.dumps(out))
 
   info "==> POST /jobs (create-backup name=$name) on $cp_url"
   local resp
-  resp=$(curl -fsS --location-trusted --max-time 30 \
-    -H "Authorization: Bearer $token" \
-    -H "Content-Type: application/json" \
-    -d "$body" \
-    "$cp_url/jobs")
+  resp=$(cp_post_job "$cp_url/jobs" "$token" "$body")
   if [[ -z "$resp" ]]; then
     die "POST /jobs returned no body — daemon unreachable?"
   fi
