@@ -434,6 +434,34 @@ nc -zv <node-ip> 19537
 If reachable but Milvus errors: nginx has no healthy backend. Check
 each node's `docker logs --tail 50 milvus`.
 
+### `nc -zv <public-ip> 19537` times out from outside the VPC
+
+`nginx-lb` and `milvus-onprem-cp` both bind to `0.0.0.0` via
+`network_mode: host`, so they listen on every interface — public
+included. If they're reachable from inside the VPC (peer-to-peer
+on the 10.x private IPs) but NOT from your laptop or another cloud,
+the issue is your cloud firewall / VPC security group, not the
+application. Open these ports in the cloud's firewall **only on the
+VMs that should be externally reachable**:
+
+| Port  | Service                  | Who needs it         |
+|-------|--------------------------|----------------------|
+| 19537 | nginx LB (Milvus gRPC)   | external pymilvus clients (recommended path) |
+| 19500 | control-plane daemon     | operator CLI from outside; OpenAPI `/docs`   |
+| 9001  | MinIO console (browser)  | optional, browser-based MinIO inspection     |
+| 19530 | Milvus direct gRPC       | debug only — bypasses HA, prefer 19537       |
+| 9000  | MinIO API                | only if external apps write S3 directly      |
+
+The `/docs` (Swagger UI), `/redoc`, `/openapi.json`, `/health`, and
+`/version` paths on the control-plane daemon are auth-exempt — once
+the firewall opens 19500, they're reachable in a browser without a
+bearer token. Every other path on 19500 requires
+`Authorization: Bearer $CLUSTER_TOKEN`.
+
+**Inter-peer ports (always required between every cluster VM, never
+need to be open to the public)**: 2379, 2380, 9000, 9091, 19500,
+19530, 19537. On 2.5: also 6650 and 8080 (Pulsar).
+
 ## Cleanup / reset
 
 If the cluster is in a state you can't reason about, the nuclear option
