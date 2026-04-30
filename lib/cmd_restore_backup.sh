@@ -237,8 +237,16 @@ _restore_auto_load() {
     return 0
   fi
 
+  # Pick replica_number to maximise availability under single-peer
+  # failure. Chaos drills showed that with replica_number=2 in a
+  # 4-peer cluster, a partitioned/dead peer could leave one shard
+  # with all replicas on it (Milvus can land both replicas of a
+  # shard on the same peer). Bumping to 3 in 4+-peer clusters
+  # guarantees each shard has copies on at least 3 different peers,
+  # so any single-peer loss leaves >=2 healthy leader candidates.
   local replicas=1
-  (( CLUSTER_SIZE >= 3 )) && replicas=2
+  (( CLUSTER_SIZE >= 2 )) && replicas=2
+  (( CLUSTER_SIZE >= 4 )) && replicas=3
 
   info "==> loading restored collections (replica_number=$replicas)"
   python3 - <<PY

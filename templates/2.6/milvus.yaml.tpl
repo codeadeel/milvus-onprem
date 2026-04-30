@@ -62,10 +62,23 @@ woodpecker:
 
 # -----------------------------------------------------------------------------
 # Common — disable RBAC by default. Users who need it can override here.
+#
+# session.ttl tightened from upstream default (30) to 10. With the
+# queryCoord tunings below, this drops the post-failover read recovery
+# window from ~50s (untuned) to ~15-20s in 4-peer chaos drills (peer
+# stops responding -> shard leaders re-elected on healthy querynodes).
+# Without these, single-peer outage caused `code=503: no available
+# shard leaders` on shards whose leader landed on the dead peer, even
+# with replica_number=2. Tradeoff: tighter timeouts mean a higher
+# chance of false-positive eviction under bursty network jitter — fine
+# on a LAN, lift toward defaults if you're across WAN. See
+# docs/FAILOVER.md.
 # -----------------------------------------------------------------------------
 common:
   security:
     authorizationEnabled: false
+  session:
+    ttl: 10
 
 # -----------------------------------------------------------------------------
 # Coordinator active-standby — required for multi-mixcoord HA in cluster
@@ -85,8 +98,14 @@ rootCoord:
 dataCoord:
   enableActiveStandby: true
 
+# queryCoord tunings: faster failure-detection so shard leaders get
+# reassigned to healthy querynodes after a peer dies. Same values
+# 2.5 ships; in 4-peer 2.6 chaos drills, this is what closes the
+# `no available shard leaders` window. See docs/FAILOVER.md.
 queryCoord:
   enableActiveStandby: true
+  checkNodeSessionInterval: 10
+  heartbeatAvailableInterval: 5000
 
 log:
   level: info

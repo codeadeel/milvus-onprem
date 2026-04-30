@@ -76,11 +76,17 @@ When a node dies, three failure-detection layers work independently:
    reassigning DML channels to surviving querynodes. **In-flight
    reads during this window get `code=106 collection on recovering`.**
 
-On 2.6 the per-node `milvus run standalone` binary co-locates its own
-coord + querynode + streamingnode (Woodpecker WAL), so when a node
-dies the surviving nodes' replicas keep serving without waiting for a
-centralized querycoord to re-shuffle channel ownership. Failover is
-invisible to the SDK in our drills.
+On 2.6 in **standalone** mode each VM runs the consolidated milvus
+binary with embedded coord + worker + Woodpecker WAL, so a node loss
+takes the cluster (it's a single-VM deploy by definition). On 2.6
+in **distributed** mode (the cluster mode milvus-onprem ships) the
+coord layer is centralized — one ACTIVE mixcoord across every peer,
+others standby — and shard-leader assignment goes through queryCoord
+the same way as 2.5. So 2.6 distributed needs the same failure-
+detection tunings as 2.5; without them, a peer outage left shard
+leaders pointed at the dead querynode for ~50s before reassignment,
+during which queries failed with `code=503: no available shard
+leaders`. The tunings below close that window to ~15-20s.
 
 ## SDK-side: retry on recovery errors
 
@@ -97,9 +103,10 @@ It only retries known recovery-class messages (`recovering`,
 and re-raises everything else, so real bugs still surface. Default
 budget is 120s. It's defense-in-depth on 2.6 but **load-bearing on 2.5**.
 
-## Server-side: tuning 2.5 for faster recovery
+## Server-side: tuning 2.5 and 2.6 for faster recovery
 
-`templates/2.5/milvus.yaml.tpl` ships these tightened defaults:
+Both `templates/2.5/milvus.yaml.tpl` and `templates/2.6/milvus.yaml.tpl`
+ship these tightened defaults:
 
 ```yaml
 common:
@@ -110,17 +117,44 @@ queryCoord:
   heartbeatAvailableInterval: 5000  # was 10000 — shorter heartbeat window
 ```
 
-Effect: the `code=106` window observed in 3-node drills drops from
-~50s (untuned) to ~15-20s.
+Effect: the recovery window after a peer outage drops from ~50s
+(untuned) to ~15-20s — both for 2.5's `code=106 collection on
+recovering` and 2.6's `code=503 no available shard leaders`.
 
 **Tradeoff: tighter timeouts mean a higher chance of false-positive
 eviction under transient network jitter.** On a LAN with sub-ms
 latency this is fine. Over WAN with bursty packet loss, lift the
-values closer to defaults. Edit `templates/2.5/milvus.yaml.tpl`,
-re-render with `milvus-onprem render`, and `up` to apply.
+values closer to defaults. Edit the relevant `templates/<version>/
+milvus.yaml.tpl`, re-render with `milvus-onprem render`, and `up`
+to apply.
 
-2.6 doesn't ship these tunings — Woodpecker bypasses the channel-
-reassignment path entirely, so they wouldn't change anything observable.
+## Replica placement for HA
+
+Milvus's shard-leader assignment is per-shard, not per-collection.
+With `replica_number=2` in a 4-peer cluster, both replicas of a
+given shard can land on the same pair of peers — and if one of
+those peers fails, the other has to serve all that shard's queries
+alone. If the failed peer happened to be the leader, the
+`heartbeatAvailableInterval` window above gates the failover.
+
+For maximum query availability under single-peer loss in a 4+-peer
+cluster, load with `replica_number=3`:
+
+```python
+client.load_collection("my_coll", replica_number=3)
+```
+
+`milvus-onprem restore-backup --load` picks this automatically:
+
+| Cluster size | Default `replica_number` |
+|---|---|
+| 1 | 1 |
+| 2-3 | 2 |
+| 4+ | 3 |
+
+Operators on smaller clusters (or who care more about resource use
+than availability) can override post-restore with an explicit
+`load_collection(... replica_number=N)`.
 
 ## Watchdog observation
 
