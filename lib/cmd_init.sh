@@ -124,6 +124,22 @@ cmd_init() {
     *) die "--data-root=$data_root must be absolute (start with '/')" ;;
   esac
 
+  # Stale milvus-etcd session anchors from a previous deploy (the
+  # singleton keys at by-dev/meta/session/{rootcoord,datacoord,...})
+  # outlive their containers. A fresh init that reuses the etcd data
+  # dir inherits them pointing at an old peer; the new mixcoord can't
+  # claim the singletons (leases still considered held) and Milvus
+  # fails every op with "find no available mixcoord". Force teardown.
+  if [[ "$force" -ne 1 ]]; then
+    local _stale=()
+    for sub in etcd minio milvus pulsar; do
+      [[ -d "$data_root/$sub" ]] && _stale+=("$data_root/$sub")
+    done
+    if (( ${#_stale[@]} > 0 )); then
+      die "$data_root has data from a previous deploy (${_stale[*]}). Run \`./milvus-onprem teardown --data --force\` first to wipe it. (Pass \`--force\` to init to reuse the data dirs anyway — NOT recommended; stale milvus-etcd session keys break the new cluster's coordinator election.)"
+    fi
+  fi
+
   # Default the Milvus image tag if not given.
   : "${milvus_image_tag:=v2.6.11}"
 
