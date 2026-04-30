@@ -121,15 +121,18 @@ where N is the 1-based position of this node's IP in PEER_IPS.
 ### "I forgot the CLUSTER_TOKEN — how do I get it back to add a new peer?"
 
 The token isn't held in any external service — **it's stored as
-`CLUSTER_TOKEN=...` in `cluster.env` on every peer**. Pick any peer
-you can SSH into and grep:
+`CLUSTER_TOKEN=...` in `cluster.env` on every peer**, sitting next to
+the `milvus-onprem` script in your repo checkout. On any peer you can
+get a shell on, run:
 
 ```bash
-ssh adeel@<any-peer> 'grep ^CLUSTER_TOKEN ~/milvus-onprem/cluster.env'
+grep ^CLUSTER_TOKEN cluster.env
 # CLUSTER_TOKEN=f3a8c12d4e5b7a9061f2d3c4b5a6978d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b
 ```
 
-Use that value with `./milvus-onprem join <leader-ip>:19500 <token>`.
+(from the directory where you cloned the repo). Use that value with
+`./milvus-onprem join <leader-ip>:19500 <token>` on the new peer.
+
 Every peer's `cluster.env` carries the same `CLUSTER_TOKEN` — if you
 rotated it via `rotate-token`, the file on every peer was updated
 atomically, so pulling from any one of them is fine.
@@ -165,22 +168,24 @@ generate one:
 ./milvus-onprem rotate-token --new-token=<your-32+-char-token>
 ```
 
-### "I lost the token AND I can't SSH into ANY peer"
+### "I lost the token AND I can't get a shell on ANY peer"
 
 Recovery requires console access to at least one VM (cloud provider
-web console, IPMI, etc.). Once you have shell on any peer:
+web console, IPMI, KVM, hypervisor terminal — whichever your environment
+provides). Once you have a shell on any peer, `cd` into the milvus-onprem
+repo on that peer and run:
 
 ```bash
-grep ^CLUSTER_TOKEN ~/milvus-onprem/cluster.env
+grep ^CLUSTER_TOKEN cluster.env
 ```
 
 If you have **zero** access to any peer's filesystem at all, the
 cluster's existing token is unrecoverable from outside (this is the
 intended security property — there's no "reset password" backdoor).
-The fallback is destructive:
+The fallback is destructive — on whichever peer you can get a shell:
 
 ```bash
-# On one peer (any console you can get):
+cd <wherever-you-cloned>/milvus-onprem
 ./milvus-onprem teardown --full --force
 ./milvus-onprem init --mode=distributed              # generates a new token
 # then re-join the other peers from scratch — DATA WILL BE LOST
@@ -199,16 +204,18 @@ rare. If it does fire:
    ./milvus-onprem rotate-token --new-token=<value-from-error-message>
    ```
 2. If the same peer keeps failing: check that peer's daemon health
+   (run on that peer):
    ```bash
-   ssh adeel@<peer> 'docker ps --filter name=milvus-onprem-cp; docker logs --tail 30 milvus-onprem-cp'
+   docker ps --filter name=milvus-onprem-cp
+   docker logs --tail 30 milvus-onprem-cp
    ```
-3. Worst case — manually edit that peer's `cluster.env` to set
-   `CLUSTER_TOKEN=<new-value>` and recreate the daemon:
+3. Worst case — manually fix that peer. From the milvus-onprem repo
+   directory on that peer:
    ```bash
-   ssh adeel@<peer> 'cd ~/milvus-onprem &&
-     sed -i "s|^CLUSTER_TOKEN=.*|CLUSTER_TOKEN=<new>|" cluster.env &&
-     docker compose --project-name <node-N> -f rendered/<node-N>/docker-compose.yml \
-       up -d --force-recreate --no-deps control-plane'
+   sed -i "s|^CLUSTER_TOKEN=.*|CLUSTER_TOKEN=<new>|" cluster.env
+   docker compose --project-name <node-N> \
+     -f rendered/<node-N>/docker-compose.yml \
+     up -d --force-recreate --no-deps control-plane
    ```
 
 ## Scale-out issues
