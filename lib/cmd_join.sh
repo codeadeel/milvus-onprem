@@ -24,15 +24,31 @@ cmd_join() {
   fi
 
   local target="$1" token="$2"; shift 2
-  local local_ip="" resume=0 skip_preflight=0
+  local local_ip="" resume=0 skip_preflight=0 data_root=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --local-ip=*)     local_ip="${1#*=}"; shift ;;
+      --data-root=*)    data_root="${1#*=}"; shift ;;
+      --data-root)      data_root="$2"; shift 2 ;;
       --resume)         resume=1; shift ;;
       --skip-preflight) skip_preflight=1; shift ;;
       *) die "unknown flag: $1 (try --help)" ;;
     esac
   done
+
+  # If --data-root passed, validate it the same way init does. Refuse
+  # the obvious foot-guns: virtual filesystems, relative paths.
+  if [[ -n "$data_root" ]]; then
+    case "$data_root" in
+      /proc/*|/sys/*|/dev/*)
+        die "--data-root=$data_root is on a virtual filesystem ($data_root) that doesn't accept regular file/directory writes. Pick a real-storage path (default /data; alternatives /var/lib/milvus, /mnt/<disk>)."
+        ;;
+    esac
+    case "$data_root" in
+      /*) ;;
+      *) die "--data-root=$data_root must be absolute (start with '/')" ;;
+    esac
+  fi
 
   # Pre-flight before we start writing files and pulling images.
   # Catches the obvious environment issues (no docker / port already
@@ -135,6 +151,18 @@ cmd_join() {
   # real host path on this peer, not the in-container /repo.
   env_upsert_kv HOST_REPO_ROOT "$REPO_ROOT"
 
+  # Per-peer DATA_ROOT override. The leader-issued cluster.env carries
+  # the leader's DATA_ROOT (default /data). When --data-root is passed
+  # to join, override locally so this peer stores its etcd / minio /
+  # milvus / pulsar data under a different mount (e.g. /mnt/nvme on a
+  # peer with faster local disks). The watcher's _sync_cluster_env_and_render
+  # only rewrites PEER_IPS + PEER_NAMES, so the local override is
+  # stable across topology changes.
+  if [[ -n "$data_root" ]]; then
+    info "applying per-peer DATA_ROOT override: $data_root (was: $(grep ^DATA_ROOT= "$CLUSTER_ENV" | head -1 | cut -d= -f2))"
+    env_upsert_kv DATA_ROOT "$data_root"
+  fi
+
   # Sanity-check the file before relying on it.
   grep -q "^PEER_IPS=" "$CLUSTER_ENV" \
     || die "fetched cluster.env doesn't look right (missing PEER_IPS)"
@@ -216,7 +244,7 @@ _join_build_daemon_image() {
 
 _cmd_join_help() {
   cat <<'EOF'
-Usage: milvus-onprem join <host>:<port> <cluster-token> [--local-ip=IP]
+Usage: milvus-onprem join <host>:<port> <cluster-token> [OPTIONS]
 
 Join an existing distributed cluster as a new peer. Run on a fresh VM
 (no cluster.env present). The control-plane daemon at <host>:<port>
@@ -231,6 +259,16 @@ ARGS:
 
 OPTIONS:
   --local-ip=IP     Override hostname -I auto-detection.
+  --data-root=PATH  Per-peer DATA_ROOT override. The leader-issued
+                    cluster.env carries the LEADER's DATA_ROOT (default
+                    /data). Pass this to store etcd / minio / milvus /
+                    pulsar data under a different mount on THIS peer
+                    only (e.g. --data-root=/mnt/nvme). Useful when peers
+                    have heterogeneous disk layouts. The override is
+                    persisted in the local cluster.env and survives
+                    topology changes (the watcher only rewrites PEER_IPS
+                    / PEER_NAMES). Path must be absolute and not under
+                    /proc, /sys, /dev.
   --resume          Re-run bootstrap when cluster.env already exists from
                     a previous join attempt that didn't finish (e.g. SSH
                     dropped between cluster.env write and bootstrap
@@ -238,6 +276,9 @@ OPTIONS:
                     straight to host_prep + bootstrap. Refuses if
                     cluster.env exists but doesn't carry the join
                     marker (ETCD_INITIAL_CLUSTER_STATE=existing).
+  --skip-preflight  Skip the local environment-sanity preflight (docker
+                    / disk / port checks). Useful only when you've
+                    already preflighted manually.
   -h, --help        Show this help.
 
 After join completes, this node is fully part of the cluster — etcd
