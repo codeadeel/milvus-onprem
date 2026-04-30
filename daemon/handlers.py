@@ -157,6 +157,25 @@ class TopologyHandlers:
 
         new_peer_ips = ",".join(ip for _name, ip in ordered)
         new_peer_names = ",".join(name for name, _ip in ordered)
+
+        # BUG-D defensive guard: refuse to write a cluster.env whose
+        # PEER_IPS doesn't include this peer's own LOCAL_IP. This
+        # happens during a transient initial-sync window when the
+        # local etcd hasn't yet replicated this peer's own topology
+        # entry from the leader — the watcher mirror is missing
+        # `self`. If we wrote the file in that state, role_detect
+        # would die silently on every subsequent CLI invocation
+        # (NODE_NAME not in PEER_NAMES) and teardown / status / smoke
+        # all break. Skip and rely on the next watcher event to
+        # retry once self appears in topology.
+        if self._cfg.local_ip and self._cfg.local_ip not in [ip for _n, ip in ordered]:
+            log.warning(
+                "skipping cluster.env write: local_ip=%s not in "
+                "computed PEER_IPS=[%s]. Topology mirror likely "
+                "mid-sync; will retry on next event.",
+                self._cfg.local_ip, new_peer_ips,
+            )
+            return True
         await asyncio.to_thread(
             _upsert_kv, cluster_env_host, "PEER_IPS", new_peer_ips
         )

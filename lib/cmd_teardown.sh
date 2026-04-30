@@ -35,17 +35,27 @@ EOF
     esac
   done
 
-  # Teardown intentionally tolerates a broken or missing cluster.env: an
-  # operator who tripped a validation rule (e.g. 2.6/pulsar) needs a way
-  # out, and teardown is the escape hatch. We load if possible — to know
-  # DATA_ROOT and run dc down — but skip the strict validation that
-  # env_require imposes. If even loading fails, fall back to defaults.
-  if env_load 2>/dev/null; then
-    role_detect 2>/dev/null || true
+  # Teardown is the escape hatch — must run successfully even when
+  # cluster.env is internally inconsistent (e.g. PEER_IPS missing
+  # LOCAL_IP, NODE_NAME not in PEER_NAMES). env_load + role_detect
+  # both call `die` on validation failures, and `die` does `exit 1`
+  # which `|| true` and `set +e` can't trap, so the script would
+  # silently exit before the destructive work even started.
+  #
+  # Source cluster.env directly instead. We only need DATA_ROOT and
+  # NODE_NAME from it — both are plain string assignments that
+  # source-without-validation gets us without invoking die. The
+  # by-name docker rm sweep below doesn't need role_detect at all.
+  if [[ -f "$CLUSTER_ENV" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$CLUSTER_ENV" 2>/dev/null \
+      || warn "cluster.env failed to source cleanly — using defaults for DATA_ROOT/NODE_NAME"
+    set +a
   else
-    warn "cluster.env missing or unloadable — proceeding with defaults"
-    : "${DATA_ROOT:=/data}"
+    warn "cluster.env missing — using defaults"
   fi
+  : "${DATA_ROOT:=/data}"
 
   warn "teardown level: $level"
   case "$level" in

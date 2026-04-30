@@ -138,19 +138,35 @@ print(json.dumps({'type':'rotate-token','params':{'new_token':'$new_token'}}))
   info "==> waiting 15s for daemons to recreate with new token"
   sleep 15
 
-  # Verify every peer accepts the new token.
+  # Verify every peer accepts the new token. Each peer's daemon
+  # container restarts ~5s after the job returns, then takes a few
+  # seconds to come healthy (FastAPI + etcd reconnect + leader
+  # election). The 15s post-job sleep covers most peers, but slow
+  # disks or a peer whose recreate landed at the tail end of the
+  # window can still need a few more seconds — so we retry per
+  # peer with backoff before declaring failure. 3 attempts × 5s
+  # apart ≈ 15s extra ceiling per peer, only paid when needed.
   info "==> verifying every peer accepts the new token"
   local failures=0
   for ip in ${PEER_IPS//,/ }; do
-    local code
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
-      -H "Authorization: Bearer $new_token" \
-      "http://$ip:${CONTROL_PLANE_PORT:-19500}/leader" 2>/dev/null \
-      || echo 000)"
+    local code attempt=0 max_attempts=3
+    while (( attempt < max_attempts )); do
+      code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+        -H "Authorization: Bearer $new_token" \
+        "http://$ip:${CONTROL_PLANE_PORT:-19500}/leader" 2>/dev/null \
+        || echo 000)"
+      [[ "$code" == "200" ]] && break
+      attempt=$((attempt + 1))
+      (( attempt < max_attempts )) && sleep 5
+    done
     if [[ "$code" == "200" ]]; then
-      info "  $ip: OK"
+      if (( attempt > 0 )); then
+        info "  $ip: OK (after $((attempt + 1)) attempts)"
+      else
+        info "  $ip: OK"
+      fi
     else
-      err "  $ip: HTTP $code (token rejected)"
+      err "  $ip: HTTP $code (token rejected after $max_attempts attempts)"
       failures=$((failures + 1))
     fi
   done

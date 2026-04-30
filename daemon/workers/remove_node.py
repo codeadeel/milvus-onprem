@@ -306,6 +306,39 @@ async def run_remove_node(ctx: JobContext) -> None:
             raise RuntimeError(f"etcd member-remove failed: {e}") from e
     ctx.progress_setter(0.95)
 
+    # 6. Wait for survivors' milvus-proxy to settle. The earlier
+    #    rolling-recreate bounced proxy on every survivor, so any
+    #    immediate operator follow-up (smoke, create-backup) hits
+    #    `rpc error: code = Canceled desc = grpc: the client
+    #    connection is closing` if proxy hasn't finished its
+    #    grpc-client-to-mixcoord rewire. Poll TCP :19530 on every
+    #    survivor until each returns 3 consecutive successful
+    #    connects (~6s of stability per peer). Bounded; non-fatal
+    #    on timeout — the cluster will keep converging on its own.
+    surviving_raw = await etcd.get_prefix(TOPOLOGY_PREFIX)
+    survivors_for_drain: list[tuple[str, str]] = []
+    for k, v in surviving_raw.items():
+        name = k.removeprefix(TOPOLOGY_PREFIX)
+        try:
+            info = json.loads(v)
+        except json.JSONDecodeError:
+            continue
+        ip = info.get("ip")
+        if ip and ip != target_ip:
+            survivors_for_drain.append((name, ip))
+    survivor_ips = [ip for _n, ip in survivors_for_drain]
+    if survivor_ips:
+        ctx.log_writer(
+            "==> waiting for survivors' milvus-proxy to settle "
+            "(prevents grpc-canceled on the next operator command)"
+        )
+        await _wait_milvus_proxy_settled(
+            survivor_ips=survivor_ips,
+            milvus_port=_milvus_port(),
+            log_writer=ctx.log_writer,
+            timeout_s=60,
+        )
+
     ctx.progress_setter(1.0)
     ctx.log_writer("")
     ctx.log_writer(f"OK {target_name} ({target_ip}) removed from the cluster.")
@@ -475,6 +508,11 @@ def _etcd_peer_port() -> int:
     return int(_read_cluster_env_value("ETCD_PEER_PORT", "2380"))
 
 
+def _milvus_port() -> int:
+    """Milvus gRPC client port (the one pymilvus connects to)."""
+    return int(_read_cluster_env_value("MILVUS_PORT", "19530"))
+
+
 def _minio_access() -> str:
     return _read_cluster_env_value("MINIO_ACCESS_KEY", "minioadmin")
 
@@ -590,6 +628,71 @@ async def _wait_minio_settled_after_remove(
             f"rendered/<name>/docker-compose.yml up -d --force-recreate "
             f"--no-deps minio`."
         )
+
+
+async def _wait_milvus_proxy_settled(
+    *,
+    survivor_ips: list[str],
+    milvus_port: int,
+    log_writer: Any,
+    timeout_s: int,
+) -> None:
+    """Block until each survivor's milvus-proxy passes a brief
+    stability test (3 consecutive successful TCP connects on the
+    Milvus client port, ~2s apart).
+
+    Why: the post-topology rolling-recreate bounces proxy on every
+    survivor. Proxy's fresh container takes a few seconds to rebuild
+    its grpc client to mixcoord, during which any operator-issued
+    pymilvus command (createCollection, insert, smoke) hits
+    `rpc error: code = Canceled desc = grpc: the client connection
+    is closing`. A brief stability check before remove-node returns
+    eliminates the foot-gun without imposing a static sleep on the
+    happy path (3 successes ≈ 4s if the proxy was already stable).
+
+    Non-fatal on timeout: the cluster keeps converging; the operator
+    is just told to wait if their next command races the recreate.
+    """
+    pending = {ip: 0 for ip in survivor_ips}
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    streak_required = 3
+    while asyncio.get_event_loop().time() < deadline:
+        for ip in list(pending.keys()):
+            ok_now = await _tcp_probe(ip, milvus_port, timeout_s=2.0)
+            if ok_now:
+                pending[ip] = pending[ip] + 1
+                if pending[ip] >= streak_required:
+                    log_writer(f"  {ip}:{milvus_port} settled (streak={pending[ip]})")
+                    pending.pop(ip, None)
+            else:
+                pending[ip] = 0
+        if not pending:
+            return
+        await asyncio.sleep(2)
+
+    if pending:
+        stragglers = ", ".join(f"{ip} (streak={s})" for ip, s in pending.items())
+        log_writer(
+            f"WARN: timed out waiting for milvus-proxy to settle on "
+            f"{stragglers}. Cluster will continue converging; if your "
+            f"next pymilvus command hits grpc-canceled, retry once."
+        )
+
+
+async def _tcp_probe(host: str, port: int, *, timeout_s: float) -> bool:
+    """Open + close a TCP connection. True iff the connect succeeds."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout_s
+        )
+    except (OSError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return True
 
 
 register_handler("remove-node", run_remove_node)

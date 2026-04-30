@@ -380,6 +380,21 @@ def _build_joiner_cluster_env(
             f"({len(all_peer_ips)}) length mismatch when building joiner "
             f"cluster.env"
         )
+    if local_ip not in all_peer_ips:
+        raise JoinError(
+            f"internal: refusing to issue cluster.env that omits the "
+            f"joiner's own IP. local_ip={local_ip}, "
+            f"PEER_IPS=[{','.join(all_peer_ips)}], "
+            f"PEER_NAMES=[{','.join(all_peer_names)}]. This is the "
+            f"BUG-D pattern (joiner not in PEER_IPS) — refusing here "
+            f"prevents the downstream role_detect-dies-silent cascade."
+        )
+    if node_name not in all_peer_names:
+        raise JoinError(
+            f"internal: refusing to issue cluster.env that omits the "
+            f"joiner's own NODE_NAME. node_name={node_name}, "
+            f"PEER_NAMES=[{','.join(all_peer_names)}]"
+        )
     lines: list[str] = []
     lines.append("# =============================================================================")
     lines.append("# milvus-onprem cluster.env (joiner copy)")
