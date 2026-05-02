@@ -61,11 +61,28 @@ cmd_bootstrap() {
     _wait_for "local MinIO" 60 minio_local_healthy \
       || warn "local MinIO not healthy yet — re-run bootstrap once it is"
   else
-    info "  distributed MinIO — waiting for all peers to reach :${MINIO_API_PORT}"
-    _wait_peers_minio_reachable 120 \
-      || warn "not all peers reachable on :${MINIO_API_PORT} yet — proceeding; re-run bootstrap once they are"
-    _wait_for "MinIO cluster health" 120 minio_cluster_healthy \
-      || warn "MinIO cluster not yet healthy — may need more peers up"
+    # Wide-pool clusters (--ha-cluster-size=N) can't format MinIO
+    # until all N peers are online — that's the documented MinIO
+    # distributed-mode rule, not an artifact of this code. On
+    # intermediate joins (e.g. node-2 of a 3-peer wide pool),
+    # waiting on cluster-health here would always burn the full
+    # 120s timeout for nothing. Skip both peer-reachability and
+    # cluster-health waits with a clear message; the leader's
+    # daemon hook ensures the bucket the moment the final peer
+    # joins, and downstream stages are idempotent so they catch
+    # up on the next bootstrap if anything raced.
+    local ha_size_b="${MINIO_HA_POOL_SIZE:-0}"
+    [[ "$ha_size_b" =~ ^[0-9]+$ ]] || ha_size_b=0
+    if (( ha_size_b >= 2 )) && (( CLUSTER_SIZE < ha_size_b )); then
+      info "  wide MinIO pool (--ha-cluster-size=$ha_size_b) waits for all $ha_size_b peers to format"
+      info "  this peer is $((CLUSTER_SIZE)) of $ha_size_b — skipping the cluster-health gate; daemon will finish bucket-ensure when the final peer joins"
+    else
+      info "  distributed MinIO — waiting for all peers to reach :${MINIO_API_PORT}"
+      _wait_peers_minio_reachable 120 \
+        || warn "not all peers reachable on :${MINIO_API_PORT} yet — proceeding; re-run bootstrap once they are"
+      _wait_for "MinIO cluster health" 120 minio_cluster_healthy \
+        || warn "MinIO cluster not yet healthy — may need more peers up"
+    fi
   fi
 
   # --- Stage 3a: start Pulsar (2.5 only, on PULSAR_HOST) ----------------
