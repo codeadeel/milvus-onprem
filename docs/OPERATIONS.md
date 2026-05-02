@@ -303,12 +303,17 @@ Cross-major upgrades require a planned migration via backup/restore:
 ./milvus-onprem teardown --full --force
 
 # on the bootstrap VM:
-./milvus-onprem init --mode=distributed --milvus-version=v2.6.x
+./milvus-onprem init --mode=distributed --milvus-version=v2.6.x --ha-cluster-size=<N>
 # on every other VM:
 ./milvus-onprem join <bootstrap-ip>:19500 <CLUSTER_TOKEN>
 # back on any peer:
 ./milvus-onprem restore-backup --from=/safe/path/pre_upgrade
 ```
+
+Pass the same `--ha-cluster-size` you used at the cluster's original
+init so MinIO renders the wide-pool layout again — omitting it
+silently downgrades the cluster to per-host pools (no host-loss
+tolerance).
 
 Plan a maintenance window. This is a hard cutover, not a rolling
 upgrade.

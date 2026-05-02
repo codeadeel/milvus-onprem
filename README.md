@@ -73,7 +73,8 @@ cd ~/milvus-onprem
 
 # On node-1 (the bootstrap node):
 ./milvus-onprem preflight                      # sanity check first
-./milvus-onprem init --mode=distributed --milvus-version=v2.6.11
+./milvus-onprem init --mode=distributed --milvus-version=v2.6.11 \
+                     --ha-cluster-size=3       # tolerate 1-of-3 host loss
 # the output prints a `./milvus-onprem join …` line — copy it
 
 # On each other node:
@@ -88,7 +89,14 @@ cd ~/milvus-onprem
 That's a working 3-node Milvus cluster. Clients connect to any peer's
 `:19537`. **Adding a 4th node later? Just run the same `join` on the
 new VM** — the daemon handles etcd member-add, topology fan-out,
-rolling MinIO recreate, and nginx reload automatically.
+rolling MinIO recreate, and nginx reload automatically. The 4th peer
+joins as its own MinIO pool (so the wide pool's `format.json` stays
+intact); the first three keep their cross-host parity.
+
+Skipping `--ha-cluster-size` is supported for clusters where you'd
+rather scale out freely than tolerate single-host outages — see
+[docs/FAILOVER.md § MinIO pool layout](docs/FAILOVER.md#minio-pool-layout)
+for the trade-off.
 
 For the full walkthrough with hardware-validated outputs:
 **[docs/TUTORIAL.md](docs/TUTORIAL.md)**.
@@ -166,7 +174,7 @@ Every operator action is one `./milvus-onprem <command>`. Common ones:
 
 ```bash
 ./milvus-onprem preflight                                    # pre-deploy sanity check
-./milvus-onprem init --mode=distributed --data-root=/data    # bootstrap node
+./milvus-onprem init --mode=distributed --data-root=/data --ha-cluster-size=3   # bootstrap node, host-loss tolerant
 ./milvus-onprem join <leader-ip>:19500 <token>               # join an existing cluster
 ./milvus-onprem join <leader-ip>:19500 <token> --data-root=/mnt/nvme  # join with per-peer data path
 ./milvus-onprem status                                       # local + peer health

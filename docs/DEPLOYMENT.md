@@ -71,7 +71,7 @@ sequenceDiagram
   participant Nx as every other VM
   participant D1 as node-1 daemon
 
-  Op->>N1: ./milvus-onprem init --mode=distributed
+  Op->>N1: ./milvus-onprem init --mode=distributed --ha-cluster-size=N
   Note over N1: cluster.env generated<br/>containers + daemon up<br/>token printed
   N1-->>Op: prints `join <ip>:19500 <token>`
 
@@ -114,8 +114,14 @@ Pick one VM as the bootstrap node. On it:
 
 ```bash
 cd ~/milvus-onprem
-./milvus-onprem init --mode=distributed
+./milvus-onprem init --mode=distributed --ha-cluster-size=3
 ```
+
+`--ha-cluster-size=N` (use the planned cluster size) renders the
+first N peers as one MinIO erasure-coded pool that tolerates loss of
+any single host. Skip it for a no-host-loss-tolerance cluster that
+scales out more freely — see
+[FAILOVER.md § MinIO pool layout](FAILOVER.md#minio-pool-layout).
 
 What this does:
 
@@ -144,9 +150,9 @@ need to retrieve it later.
 ### Useful init flags
 
 ```bash
-./milvus-onprem init --mode=distributed --milvus-version=v2.5.4
-./milvus-onprem init --mode=distributed --data-root=/srv/milvus
-./milvus-onprem init --mode=distributed --milvus-port=29530 --lb-port=29537
+./milvus-onprem init --mode=distributed --milvus-version=v2.5.4 --ha-cluster-size=3
+./milvus-onprem init --mode=distributed --data-root=/srv/milvus --ha-cluster-size=3
+./milvus-onprem init --mode=distributed --milvus-port=29530 --lb-port=29537 --ha-cluster-size=3
 ```
 
 See `./milvus-onprem init --help` for the full flag list.

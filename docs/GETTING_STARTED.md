@@ -79,8 +79,17 @@ flowchart LR
 ```bash
 cd ~/milvus-onprem
 ./milvus-onprem preflight                                     # ① sanity check
-./milvus-onprem init --mode=distributed --milvus-version=v2.6.11   # ② generates cluster.env + boots services
+./milvus-onprem init --mode=distributed --milvus-version=v2.6.11 \
+                     --ha-cluster-size=3                      # ② host-loss tolerant
 ```
+
+`--ha-cluster-size=N` declares the initial peer count so MinIO renders
+the first N peers as one erasure-coded pool that survives loss of any
+single host. Pick `N` to match your planned cluster size (3 in this
+walkthrough). Omit the flag if you'd rather scale out freely than
+tolerate single-host outages — see
+[FAILOVER.md § MinIO pool layout](FAILOVER.md#minio-pool-layout) for
+the trade-off.
 
 What `init` does:
 
@@ -269,7 +278,7 @@ wipes the right path on each peer.
 ./milvus-onprem preflight                  # sanity-check ports / docker / inter-peer TCP
 
 # Lifecycle
-./milvus-onprem init --mode=distributed --milvus-version=v2.6.11
+./milvus-onprem init --mode=distributed --milvus-version=v2.6.11 --ha-cluster-size=3
 ./milvus-onprem join <bootstrap-ip>:19500 <token>           # on each new peer
 ./milvus-onprem teardown --full --force                     # destroy + wipe data
 

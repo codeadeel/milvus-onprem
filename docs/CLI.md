@@ -24,13 +24,14 @@ Generate `cluster.env` on this node. Required first step.
 
 ```bash
 ./milvus-onprem init --mode=standalone
-./milvus-onprem init --mode=distributed [--peer-ips=IP,IP,...]
-./milvus-onprem init --mode=distributed --milvus-image-tag=v2.5.4
+./milvus-onprem init --mode=distributed --ha-cluster-size=3
+./milvus-onprem init --mode=distributed --milvus-image-tag=v2.5.4 --ha-cluster-size=3
 ```
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--mode=standalone\|distributed` | required | `standalone` = single VM, no HA. `distributed` = multi-VM with control-plane daemon. |
+| `--ha-cluster-size=N` | unset | Distributed only, integer ≥ 2. Renders the first N peers as one MinIO erasure-coded pool that tolerates loss of any single host. Frozen at init; switching the layout later requires teardown + re-init. Unset = legacy per-host pools (no host-loss tolerance, but join-time scale-out is trivially safe). See [FAILOVER.md § MinIO pool layout](FAILOVER.md#minio-pool-layout). |
 | `--peer-ips=IP,IP,...` | (distributed only) | Optional bootstrap-time hint. Distributed mode also grows via `join`; new peers don't need to be in `--peer-ips` ahead of time. |
 | `--milvus-image-tag=vX.Y.Z` | `v2.6.11` | `v2.5.x` selects the 2.5 templates. |
 | `--overwrite` | off | Allow re-init when `cluster.env` already exists. |

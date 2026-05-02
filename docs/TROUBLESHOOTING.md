@@ -187,7 +187,7 @@ The fallback is destructive — on whichever peer you can get a shell:
 ```bash
 cd <wherever-you-cloned>/milvus-onprem
 ./milvus-onprem teardown --full --force
-./milvus-onprem init --mode=distributed              # generates a new token
+./milvus-onprem init --mode=distributed --ha-cluster-size=<N>   # generates a new token
 # then re-join the other peers from scratch — DATA WILL BE LOST
 ```
 
@@ -580,7 +580,7 @@ Restore from those:
 
 ```bash
 # on the bootstrap VM:
-./milvus-onprem init --mode=distributed
+./milvus-onprem init --mode=distributed --ha-cluster-size=<N>
 # on every other VM:
 ./milvus-onprem join <bootstrap-ip>:19500 <CLUSTER_TOKEN>
 # back on any peer:

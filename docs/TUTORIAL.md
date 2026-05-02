@@ -116,8 +116,15 @@ open on at least 2379/2380/9000/9091/19500/19530/19537.
 
 ```bash
 cd ~/milvus-onprem
-./milvus-onprem init --mode=distributed --milvus-version=v2.6.11
+./milvus-onprem init --mode=distributed --milvus-version=v2.6.11 \
+                     --ha-cluster-size=3
 ```
+
+`--ha-cluster-size=3` declares the initial peer count. MinIO renders
+the first three peers as ONE erasure-coded pool (12 drives, EC:3),
+which tolerates loss of any single host. Omit the flag for the
+legacy per-host-pool layout — see
+[FAILOVER.md § MinIO pool layout](FAILOVER.md#minio-pool-layout).
 
 What this does, in order:
 
@@ -651,7 +658,8 @@ docker-compose service shape differs):
 Then on m1:
 
 ```bash
-./milvus-onprem init --mode=distributed --milvus-version=v2.5.4
+./milvus-onprem init --mode=distributed --milvus-version=v2.5.4 \
+                     --ha-cluster-size=4
 ```
 
 On m2/m3/m4:
@@ -704,7 +712,7 @@ peer); upgrade is same speed.
 
 ```bash
 # Lifecycle
-./milvus-onprem init --mode=distributed --milvus-version=v2.6.11
+./milvus-onprem init --mode=distributed --milvus-version=v2.6.11 --ha-cluster-size=3
 ./milvus-onprem join <leader-ip>:19500 <token>           # on each new peer
 ./milvus-onprem join <leader-ip>:19500 <token> --resume  # SSH dropped mid-join? resume
 ./milvus-onprem teardown --full --force                  # everything (data + cluster.env)
