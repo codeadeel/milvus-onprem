@@ -29,6 +29,7 @@ cmd_init() {
   local local_ip=""
   local milvus_port="" lb_port="" etcd_client_port="" etcd_peer_port=""
   local minio_api_port="" control_plane_port=""
+  local ha_cluster_size=""
   local overwrite=0
   local force=0
   local skip_bootstrap=0
@@ -51,6 +52,8 @@ cmd_init() {
       --etcd-peer-port=*)      etcd_peer_port="${1#*=}"; shift ;;
       --minio-api-port=*)      minio_api_port="${1#*=}"; shift ;;
       --control-plane-port=*)  control_plane_port="${1#*=}"; shift ;;
+      --ha-cluster-size=*)     ha_cluster_size="${1#*=}"; shift ;;
+      --ha-cluster-size)       ha_cluster_size="$2"; shift 2 ;;
       --overwrite)             overwrite=1; shift ;;
       --force)                 force=1; shift ;;
       --skip-bootstrap)        skip_bootstrap=1; shift ;;
@@ -172,12 +175,25 @@ cmd_init() {
     generated_token=1
   fi
 
+  # Validate --ha-cluster-size. Only meaningful for distributed mode;
+  # an integer >= 2 declares the initial peer count that MinIO should
+  # treat as one wide erasure-coded pool. Anything else (unset, 1, 0,
+  # non-numeric) falls back to legacy per-host pools.
+  if [[ -n "$ha_cluster_size" ]]; then
+    [[ "$ha_cluster_size" =~ ^[0-9]+$ ]] \
+      || die "--ha-cluster-size must be a positive integer (got: $ha_cluster_size)"
+    (( ha_cluster_size >= 2 )) \
+      || die "--ha-cluster-size must be >= 2 to enable cross-host erasure parity (got: $ha_cluster_size)"
+    [[ "$mode" == "distributed" ]] \
+      || die "--ha-cluster-size only applies to --mode=distributed (got --mode=$mode)"
+  fi
+
   info "==> init: mode=$mode, node-1=$local_ip, milvus=$milvus_image_tag"
   _init_write_cluster_env \
     "$mode" "$local_ip" "$cluster_name" "$milvus_image_tag" \
     "$minio_secret_key" "$cluster_token" "$data_root" \
     "$milvus_port" "$lb_port" "$etcd_client_port" "$etcd_peer_port" \
-    "$minio_api_port" "$control_plane_port"
+    "$minio_api_port" "$control_plane_port" "$ha_cluster_size"
   ok "wrote $CLUSTER_ENV"
 
   if (( generated_secret )); then
@@ -348,7 +364,7 @@ _init_write_cluster_env() {
   local mode="$1" local_ip="$2" cluster_name="$3" image_tag="$4"
   local secret="$5" token="$6" data_root="$7"
   local milvus_port="$8" lb_port="$9" etcd_client="${10}" etcd_peer="${11}"
-  local minio_api="${12}" cp_port="${13}"
+  local minio_api="${12}" cp_port="${13}" ha_cluster_size="${14}"
 
   {
     echo "# ============================================================================="
@@ -406,6 +422,17 @@ _init_write_cluster_env() {
     [[ -n "$etcd_peer"    ]] && echo "ETCD_PEER_PORT=$etcd_peer"
     [[ -n "$minio_api"    ]] && echo "MINIO_API_PORT=$minio_api"
     [[ -n "$cp_port"      ]] && echo "CONTROL_PLANE_PORT=$cp_port"
+    if [[ -n "$ha_cluster_size" ]]; then
+      echo ""
+      echo "# MinIO HA pool size — set at init time, frozen for the life of"
+      echo "# the cluster. The first N peers form one erasure-coded pool"
+      echo "# that tolerates loss of any single host. Peers joining after"
+      echo "# the first N land in additional per-host pools (no cross-host"
+      echo "# parity for their share of writes). Unset = legacy per-host"
+      echo "# pools (no host-loss tolerance, but join-time scale-out is"
+      echo "# trivially safe). See docs/FAILOVER.md."
+      echo "MINIO_HA_POOL_SIZE=$ha_cluster_size"
+    fi
     echo ""
     echo "# Defaults applied automatically (uncomment to override):"
     echo "# MQ_TYPE=woodpecker          # 2.6: woodpecker only.   2.5: pulsar only"
@@ -473,6 +500,16 @@ PORT OVERRIDES (rarely needed):
   --etcd-peer-port=N          Default: 2380
   --minio-api-port=N          Default: 9000
   --control-plane-port=N      Default: 19500 (distributed only)
+
+HIGH AVAILABILITY (distributed mode):
+  --ha-cluster-size=N         Declare the initial peer count so MinIO renders
+                              the first N peers as ONE erasure-coded pool.
+                              N>=3 tolerates loss of any single host (reads
+                              and writes keep working). Peers joining beyond
+                              N land in per-host pools without cross-host
+                              parity. Frozen at init; unset = legacy per-host
+                              pools (no host-loss tolerance). See
+                              docs/FAILOVER.md.
 
 OTHER:
   --overwrite                 Replace an existing cluster.env without prompt.

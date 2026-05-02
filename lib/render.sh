@@ -91,6 +91,7 @@ _render_var_list() {
            PULSAR_BROKER_PORT PULSAR_HTTP_PORT \
            ETCD_INITIAL_CLUSTER ETCD_INITIAL_CLUSTER_STATE \
            MINIO_VOLUMES MINIO_VOLUMES_BLOCK MINIO_SERVER_CMD \
+           MINIO_HA_POOL_SIZE MINIO_EXTRA_HOSTS_BLOCK \
            NGINX_UPSTREAM_BLOCK \
            MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML \
            PULSAR_HOST PULSAR_HOST_IP PULSAR_SERVICE_BLOCK \
@@ -107,10 +108,101 @@ _render_var_list() {
 }
 
 # -----------------------------------------------------------------------------
+# MinIO pool layout helpers. Two paths:
+#
+#   _render_minio_ha_pool M
+#     First M peers form one pool of 4M drives behind `mio-{1...M}`
+#     aliases (resolved via extra_hosts). Peers beyond M become
+#     additional per-host pools. With M>=3 this layout tolerates
+#     loss of any single host because erasure parity spans hosts.
+#
+#   _render_minio_legacy_pools
+#     One pool per peer. No cross-host parity, but join-time
+#     scale-out preserves existing pools' on-disk format.json.
+#
+# Both paths set MINIO_VOLUMES, MINIO_SERVER_CMD, and (for the HA
+# path) MINIO_EXTRA_HOSTS_BLOCK.
+# -----------------------------------------------------------------------------
+_render_minio_ha_pool() {
+  local ha_size="$1"
+  local drives_per_node="${MINIO_DRIVES_PER_NODE:-4}"
+
+  # Wide pool spanning the first ha_size peers via sequential aliases.
+  # The single-arg form `http://mio-{1...M}:PORT/drive{1...K}` is
+  # what tells MinIO "treat all of these as one erasure-coded pool"
+  # — multiple space-separated args would create multiple pools.
+  MINIO_VOLUMES="http://mio-{1...${ha_size}}:${MINIO_API_PORT}/drive{1...${drives_per_node}}"
+
+  # Peers that joined after the initial HA pool was sized are
+  # appended as their own per-host pools. Their alias index is the
+  # node-N suffix, so e.g. node-4 in a ha_size=3 cluster lands as
+  # `http://mio-4:PORT/drive{1...4}` — a new pool, leaving the
+  # 12-drive wide pool's format.json untouched.
+  local i name idx
+  for ((i=0; i<CLUSTER_SIZE; i++)); do
+    name="${PEER_NAMES[$i]}"
+    idx="${name#node-}"
+    if [[ "$idx" =~ ^[0-9]+$ ]] && (( idx > ha_size )); then
+      MINIO_VOLUMES+=" http://mio-${idx}:${MINIO_API_PORT}/drive{1...${drives_per_node}}"
+    fi
+  done
+  MINIO_SERVER_CMD="server ${MINIO_VOLUMES} --address :${MINIO_API_PORT} --console-address :${MINIO_CONSOLE_PORT}"
+
+  # extra_hosts block. Maps every alias the wide-pool ellipsis can
+  # produce (mio-1..mio-ha_size) plus every joined peer beyond
+  # ha_size. Unjoined wide-pool slots get 127.0.0.1 as a sentinel so
+  # DNS resolution always succeeds — MinIO then logs "remote
+  # disconnected" and waits for the real peer rather than panicking
+  # on a `no such host` error. When the peer joins, the topology
+  # watcher re-renders with the real IP and the rolling-recreate
+  # picks it up.
+  declare -A _alias_to_ip=()
+  for ((i=0; i<CLUSTER_SIZE; i++)); do
+    name="${PEER_NAMES[$i]}"
+    idx="${name#node-}"
+    [[ "$idx" =~ ^[0-9]+$ ]] || continue
+    _alias_to_ip[$idx]="${PEERS_ARR[$i]}"
+  done
+  MINIO_EXTRA_HOSTS_BLOCK=""
+  local k
+  for ((k=1; k<=ha_size; k++)); do
+    local mapped="${_alias_to_ip[$k]:-127.0.0.1}"
+    MINIO_EXTRA_HOSTS_BLOCK+="      - \"mio-${k}:${mapped}\""$'\n'
+  done
+  for k in "${!_alias_to_ip[@]}"; do
+    if (( k > ha_size )); then
+      MINIO_EXTRA_HOSTS_BLOCK+="      - \"mio-${k}:${_alias_to_ip[$k]}\""$'\n'
+    fi
+  done
+  if [[ -n "$MINIO_EXTRA_HOSTS_BLOCK" ]]; then
+    MINIO_EXTRA_HOSTS_BLOCK="    extra_hosts:"$'\n'"${MINIO_EXTRA_HOSTS_BLOCK%$'\n'}"
+  fi
+}
+
+_render_minio_legacy_pools() {
+  local drives_per_node="${MINIO_DRIVES_PER_NODE:-4}"
+  local i ip
+  MINIO_VOLUMES=""
+  for ((i=0; i<CLUSTER_SIZE; i++)); do
+    ip="${PEERS_ARR[$i]}"
+    MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive{1...${drives_per_node}} "
+  done
+  MINIO_VOLUMES="${MINIO_VOLUMES% }"
+  MINIO_SERVER_CMD="server ${MINIO_VOLUMES} --address :${MINIO_API_PORT} --console-address :${MINIO_CONSOLE_PORT}"
+  MINIO_EXTRA_HOSTS_BLOCK=""
+}
+
+# -----------------------------------------------------------------------------
 # Compute strings that need iteration over PEER_IPS — envsubst can't do
 # loops, so we materialise them into single variables here.
 # -----------------------------------------------------------------------------
 _render_compute_derived() {
+  # MinIO extra_hosts is empty for any path that doesn't go through
+  # _render_minio_ha_pool. Initialise here so envsubst always has a
+  # value (an unset var would leak the literal `${MINIO_EXTRA_HOSTS_BLOCK}`
+  # token into the rendered compose).
+  MINIO_EXTRA_HOSTS_BLOCK=""
+
   # etcd --initial-cluster:  node-1=http://10.0.0.10:2380,node-2=...
   ETCD_INITIAL_CLUSTER=""
   local i ip
@@ -141,22 +233,32 @@ _render_compute_derived() {
   #   MODE=standalone:  one drive, command points at /data, mounted from
   #                     ${DATA_ROOT}/minio. Single-instance MinIO.
   #
-  #   MODE=distributed: each peer contributes 4 drives to a SHARED
-  #                     distributed pool. Server command lists every
-  #                     peer's drives:
+  #   MODE=distributed: each peer contributes 4 drives. The pool layout
+  #                     depends on MINIO_HA_POOL_SIZE (set at init via
+  #                     `init --ha-cluster-size=N`):
   #
-  #                       server http://m1:9000/drive1..4 \\
-  #                              http://m2:9000/drive1..4 ...
+  #     MINIO_HA_POOL_SIZE >= 2 (HA layout):
+  #       The first M peers (M = MINIO_HA_POOL_SIZE) form ONE pool of
+  #       4M drives, addressed via the `mio-{1...M}` alias ellipsis:
   #
-  #                     At N=1 the command is just this peer's 4 URLs —
-  #                     MinIO runs as a distributed-mode-of-1 with 4
-  #                     drives, ready to scale. When peers join, every
-  #                     peer's MINIO_VOLUMES grows to include the new
-  #                     drives, and each MinIO is recreated to pick
-  #                     up the new pool list (cf. handlers.py).
+  #         server http://mio-{1...M}:9000/drive{1...4} ...
   #
-  # Older N>=3 inherits the standalone path on a legacy redeploy; new
-  # deploys go through MODE=distributed.
+  #       Aliases resolve to peer IPs via the docker-compose
+  #       extra_hosts block rendered in MINIO_EXTRA_HOSTS_BLOCK. With
+  #       M>=3 and default MinIO parity (EC:M), losing any single host
+  #       leaves the pool readable AND writable — erasure parity spans
+  #       hosts, not just drives within a host. Peers that join LATER
+  #       (index > M) are appended as additional per-host pools so
+  #       their format.json doesn't conflict with the existing wide
+  #       pool's on-disk record.
+  #
+  #     MINIO_HA_POOL_SIZE unset or <=1 (legacy per-host-pool layout):
+  #       Each peer is its OWN pool. Joining new peers appends args
+  #       without disturbing existing pools' format.json. Survives
+  #       grow gracefully but loses host-loss tolerance — a peer
+  #       outage takes ListObjects (and therefore the bucket) offline.
+  #       This is the path operators get when they don't pre-declare
+  #       --ha-cluster-size at init.
   if [[ "${MODE:-standalone}" == "distributed" ]]; then
     MINIO_VOLUMES_BLOCK="      - \${DATA_ROOT}/minio/drive1:/drive1
       - \${DATA_ROOT}/minio/drive2:/drive2
@@ -164,22 +266,14 @@ _render_compute_derived() {
       - \${DATA_ROOT}/minio/drive4:/drive4"
     MINIO_VOLUMES_BLOCK="${MINIO_VOLUMES_BLOCK//\$\{DATA_ROOT\}/${DATA_ROOT}}"
 
-    # Each peer is its OWN MinIO server pool (4 drives via the
-    # `drive{1...4}` ellipsis MinIO understands). Multiple
-    # space-separated args make multiple pools; existing pools' on-
-    # disk format.json stays intact when a peer is added, so growing
-    # the cluster doesn't blow away existing data. Listing each drive
-    # individually instead would force MinIO to treat all drives as
-    # one pool, and at grow time it'd refuse to mount the old drives
-    # because their format.json says "you used to be a 4-drive pool,
-    # now you're an 8-drive pool — no thanks."
-    MINIO_VOLUMES=""
-    for ((i=0; i<CLUSTER_SIZE; i++)); do
-      local ip="${PEERS_ARR[$i]}"
-      MINIO_VOLUMES+="http://${ip}:${MINIO_API_PORT}/drive{1...4} "
-    done
-    MINIO_VOLUMES="${MINIO_VOLUMES% }"
-    MINIO_SERVER_CMD="server ${MINIO_VOLUMES} --address :${MINIO_API_PORT} --console-address :${MINIO_CONSOLE_PORT}"
+    local ha_size="${MINIO_HA_POOL_SIZE:-0}"
+    [[ "$ha_size" =~ ^[0-9]+$ ]] || ha_size=0
+
+    if (( ha_size >= 2 )); then
+      _render_minio_ha_pool "$ha_size"
+    else
+      _render_minio_legacy_pools
+    fi
   elif (( CLUSTER_SIZE == 1 )); then
     MINIO_VOLUMES_BLOCK="      - ${DATA_ROOT}/minio:/data"
     MINIO_VOLUMES="/data"
@@ -255,6 +349,7 @@ _render_compute_derived() {
 
   export ETCD_INITIAL_CLUSTER ETCD_INITIAL_CLUSTER_STATE \
          MINIO_VOLUMES MINIO_VOLUMES_BLOCK MINIO_SERVER_CMD \
+         MINIO_HA_POOL_SIZE MINIO_EXTRA_HOSTS_BLOCK \
          NGINX_UPSTREAM_BLOCK \
          MILVUS_ETCD_ENDPOINTS MILVUS_ETCD_ENDPOINTS_YAML \
          PULSAR_HOST_IP PULSAR_SERVICE_BLOCK \

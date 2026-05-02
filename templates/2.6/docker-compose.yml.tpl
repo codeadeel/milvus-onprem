@@ -64,6 +64,7 @@ services:
       - MINIO_REGION=${MINIO_REGION}
     volumes:
 ${MINIO_VOLUMES_BLOCK}
+${MINIO_EXTRA_HOSTS_BLOCK}
     command: ${MINIO_SERVER_CMD}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${MINIO_API_PORT}/minio/health/live"]

@@ -67,8 +67,14 @@ When a node dies, three failure-detection layers work independently:
 
 1. **etcd Raft** — etcd peers lose contact with the dead member's
    lease in milliseconds; quorum holds with `(N-1)/2` member loss.
-2. **MinIO erasure coding** — surviving drives keep serving reads/
-   writes for the missing share; degraded mode is transparent.
+2. **MinIO erasure coding** — host-loss tolerance depends on which
+   pool layout was chosen at `init` (see [MinIO pool layout](#minio-pool-layout)
+   below). With `init --ha-cluster-size=N`, the first N peers form a
+   single erasure-coded pool that tolerates loss of any one host —
+   reads and writes keep flowing on the survivors. Without the flag,
+   each peer is its own pool and a host outage takes the bucket
+   offline (any `ListObjects` call fails with `0 drives provided`,
+   which cascades into a Milvus streamingnode boot panic).
 3. **Milvus session/health** — coord and node sessions in etcd have
    a TTL (`common.session.ttl`, default 30s). The lease only expires
    *after* the TTL, then querycoord runs its node-session check
@@ -87,6 +93,69 @@ detection tunings as 2.5; without them, a peer outage left shard
 leaders pointed at the dead querynode for ~50s before reassignment,
 during which queries failed with `code=503: no available shard
 leaders`. The tunings below close that window to ~15-20s.
+
+## MinIO pool layout
+
+`init --ha-cluster-size=N` (distributed mode only) chooses how MinIO
+spreads erasure parity across hosts. The flag is frozen at init —
+the only way to change it is teardown plus re-init.
+
+```mermaid
+flowchart TB
+  subgraph ha["init --ha-cluster-size=3 — wide pool, host-loss tolerated"]
+    direction LR
+    H1["node-1 drives 1-4"] -- one pool --> P1[(12-drive<br/>erasure-coded<br/>pool, EC parity<br/>spans hosts)]
+    H2["node-2 drives 1-4"] -- one pool --> P1
+    H3["node-3 drives 1-4"] -- one pool --> P1
+  end
+  subgraph legacy["default — per-host pools, no host-loss tolerance"]
+    direction LR
+    L1["node-1 drives 1-4"] --> Q1[(pool 1)]
+    L2["node-2 drives 1-4"] --> Q2[(pool 2)]
+    L3["node-3 drives 1-4"] --> Q3[(pool 3)]
+  end
+```
+
+**HA layout** (`--ha-cluster-size=N>=3`): the first N peers register
+under sequential aliases `mio-1 ... mio-N` (resolved via the minio
+container's `extra_hosts` block) and MinIO sees a single
+`http://mio-{1...N}:9000/drive{1...4}` ellipsis — one pool, 4N
+drives. Default MinIO parity is `EC:N` for an N-host set, so loss of
+any one host leaves enough drives for read AND write quorum. Peers
+that join AFTER the initial N land in additional per-host pools
+(no cross-host parity for their share of writes). The wide pool's
+`format.json` stays untouched at grow time.
+
+**Legacy layout** (no `--ha-cluster-size`): each peer is its own
+pool. Joining and removing peers never disturbs neighbouring pools'
+on-disk state, so scale-out is trivially safe — but losing a host
+loses an entire pool, and any `ListObjects` call fans out across
+all pools and fails the moment one is unreachable. The cascade is
+real and observable: the failing list bubbles up into Milvus
+streamingnode's chunk-manager precheck on every container restart,
+which then panics with `init query node segcore failed [...]
+listPathRaw: 0 drives provided` and crash-loops the cluster.
+
+**Choose at init time:**
+
+| Goal | Flag |
+|---|---|
+| Survive any single host going offline | `--ha-cluster-size=<peer count>` |
+| Frequent scale-out, tolerate manual remove-node only | omit the flag |
+
+For a 3-VM cluster known up front, `--ha-cluster-size=3` is the
+right default. Run it on the bootstrap node:
+
+```bash
+./milvus-onprem init --mode=distributed --milvus-version=v2.6.11 \
+                     --ha-cluster-size=3
+```
+
+Then `join` from each remaining VM as usual. MinIO on the bootstrap
+node logs `Waiting for at least 1 remote servers...` until the
+peers appear; each peer's join triggers a rolling-recreate that
+fills in the `mio-K → <ip>` mapping in every other peer's
+`extra_hosts`, and bootstrap completes once the quorum is reachable.
 
 ## SDK-side: retry on recovery errors
 
