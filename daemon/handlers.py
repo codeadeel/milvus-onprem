@@ -270,6 +270,20 @@ class TopologyHandlers:
         log.info("minio recreated; waiting for healthy")
         await _wait_minio_healthy(timeout_s=self._cfg.rolling_minio_healthy_wait_s)
 
+        # Wide-pool bucket-ensure (init --ha-cluster-size=N>=2). Init
+        # on the bootstrap node deferred milvus-bucket creation
+        # because a wide pool can't write until peers bring it to
+        # quorum. Every peer's daemon retries here after every
+        # rolling MinIO recreate; `mc mb --ignore-existing` is
+        # idempotent so the second-and-after attempts are no-ops.
+        # Failures (cluster still below quorum, transient mc error)
+        # log and move on — the next topology event drives another
+        # retry. Skip entirely on the legacy per-host-pool layout
+        # (init creates the bucket on a single-host pool with no
+        # quorum constraint).
+        if self._cfg.minio_ha_pool_size >= 2:
+            await self._ensure_milvus_bucket()
+
         # After topology change, Milvus services on every peer have a
         # newly-rendered milvus.yaml that may list different etcd
         # endpoints (peer added/removed) and a different
@@ -319,6 +333,78 @@ class TopologyHandlers:
             return
         log.info("milvus services recreated post topology change: %s",
                  ", ".join(to_recreate))
+
+    async def _ensure_milvus_bucket(self) -> None:
+        """Make sure `milvus-bucket` exists on the local MinIO.
+
+        Called by recreate_minio_local after every wide-pool rolling
+        recreate. Idempotent — `mc mb --ignore-existing` succeeds
+        whether the bucket is brand new or already present, so every
+        peer can run this without coordination. The first peer whose
+        local MinIO has reached pool quorum after the recreate wins
+        the race; everyone else's call is a no-op.
+
+        Probes /minio/health/cluster first (not /live — that returns
+        200 even when the wide pool is still "Waiting for at least 1
+        remote servers"). Skips silently if the cluster isn't quorate
+        yet, since the next topology event will retry.
+        """
+        if not await self._minio_cluster_quorate():
+            log.info(
+                "minio cluster not yet at quorum; deferring "
+                "milvus-bucket ensure to next topology event"
+            )
+            return
+
+        # `mc alias set` is required because the milvus-minio
+        # container's mc config lives in the container's ephemeral
+        # ~/.mc and is wiped on every recreate. Setting it before
+        # every operation is idempotent and cheap.
+        alias_cmd = (
+            f"docker exec milvus-minio mc alias set local "
+            f"http://127.0.0.1:{self._cfg.minio_api_port} "
+            f"{shlex.quote(self._cfg.minio_access_key)} "
+            f"{shlex.quote(self._cfg.minio_secret_key)}"
+        )
+        rc, _out, err = await _run(alias_cmd)
+        if rc != 0:
+            log.warning(
+                "minio alias set failed (rc=%d): %s — bucket ensure "
+                "skipped this round",
+                rc, err.strip()[:300],
+            )
+            return
+
+        mb_cmd = "docker exec milvus-minio mc mb --ignore-existing local/milvus-bucket"
+        rc, out, err = await _run(mb_cmd)
+        if rc != 0:
+            log.warning(
+                "minio bucket ensure (mc mb) failed (rc=%d): %s",
+                rc, err.strip()[:300],
+            )
+            return
+        log.info(
+            "milvus-bucket ensured on local MinIO (wide-pool quorum reached)"
+        )
+
+    async def _minio_cluster_quorate(self) -> bool:
+        """0-cost probe: curl /minio/health/cluster on the local MinIO.
+
+        Returns True only when the distributed pool has formed write
+        quorum. The `/live` endpoint is too lenient — it returns 200
+        even when the pool is still waiting on remote servers. Three
+        2s probes give the recreate sweep a chance to settle without
+        blocking the topology handler for long.
+        """
+        for _ in range(3):
+            rc, _out, _err = await _run(
+                f"curl -sf --max-time 3 "
+                f"http://127.0.0.1:{self._cfg.minio_api_port}/minio/health/cluster"
+            )
+            if rc == 0:
+                return True
+            await asyncio.sleep(2)
+        return False
 
     async def apply_pulsar_host_change(self, new_pulsar_host: str) -> None:
         """Update PULSAR_HOST in this peer's cluster.env, re-render, and

@@ -21,6 +21,12 @@ class DaemonConfig(BaseSettings):
         env_prefix="MILVUS_ONPREM_",
         case_sensitive=False,
         extra="ignore",
+        # Empty env values fall back to Field defaults instead of failing
+        # int/bool parsing. Render emits `MILVUS_ONPREM_MINIO_HA_POOL_SIZE=`
+        # when the cluster runs the legacy per-host-pool layout (the
+        # cluster.env field is unset); without this, pydantic raises on
+        # the empty string.
+        env_ignore_empty=True,
     )
 
     cluster_name: str = Field(..., description="Logical cluster ID.")
@@ -148,6 +154,36 @@ class DaemonConfig(BaseSettings):
         description=(
             "Maximum seconds to wait for a recreated MinIO container "
             "to report healthy before the rolling sweep moves on."
+        ),
+    )
+
+    # MinIO knobs the bucket-ensure hook needs. Wide-pool clusters
+    # (init --ha-cluster-size=N) defer milvus-bucket creation at init
+    # because the pool can't write until joins bring it to quorum.
+    # Each peer's daemon re-tries the ensure after every rolling
+    # MinIO recreate, so the bucket appears the moment the cluster
+    # reaches quorum — no operator action required.
+    minio_api_port: int = Field(
+        default=9000,
+        description="Local MinIO API port. Used to probe cluster-health and run mc.",
+    )
+    minio_access_key: str = Field(
+        default="minioadmin",
+        description="MinIO root user. Used by `mc alias set local`.",
+    )
+    minio_secret_key: str = Field(
+        default="",
+        description=(
+            "MinIO root password. Used by `mc alias set local`. The daemon "
+            "needs write credentials only to call `mc mb local/milvus-bucket`."
+        ),
+    )
+    minio_ha_pool_size: int = Field(
+        default=0,
+        description=(
+            "If >= 2, the cluster runs the wide-pool MinIO layout and the "
+            "bucket-ensure hook activates after every topology change. "
+            "0 = legacy per-host-pool layout, no daemon-side bucket logic."
         ),
     )
 

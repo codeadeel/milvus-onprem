@@ -138,10 +138,23 @@ cmd_bootstrap() {
   # already moved past this stage), and `mc` commands against a
   # not-yet-quorate local MinIO time out / fail. Skip the ensure on
   # joiners; only the very first peer (init) creates the bucket.
+  #
+  # Wide-pool init (--ha-cluster-size=N): MinIO can't reach pool
+  # quorum until at least one other peer joins, so bucket creation
+  # is deferred. The leader's daemon retries the ensure after every
+  # rolling-recreate (cf. handlers.recreate_minio_local), so the
+  # bucket appears automatically once joins bring the wide pool to
+  # quorum — no operator action needed beyond running `join` from
+  # each remaining peer.
   info "==> Stage 7/7: ensure milvus-bucket exists in MinIO"
+  local ha_size="${MINIO_HA_POOL_SIZE:-0}"
+  [[ "$ha_size" =~ ^[0-9]+$ ]] || ha_size=0
   if [[ "${MODE:-standalone}" == "distributed" \
         && "${ETCD_INITIAL_CLUSTER_STATE:-new}" == "existing" ]]; then
     info "(joiner: bucket already exists in cluster MinIO from init; skipping)"
+  elif (( ha_size >= 2 )) && (( CLUSTER_SIZE < ha_size )); then
+    warn "wide MinIO pool (--ha-cluster-size=$ha_size) needs $ha_size peers to reach quorum; have $CLUSTER_SIZE"
+    info "bucket creation deferred — run \`./milvus-onprem join\` from each remaining peer; the daemon ensures the bucket automatically once quorum forms"
   elif minio_local_healthy; then
     minio_create_milvus_bucket
   else

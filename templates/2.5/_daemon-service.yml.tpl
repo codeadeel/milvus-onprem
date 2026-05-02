@@ -33,6 +33,17 @@
       - MILVUS_ONPREM_AUTO_MIGRATE_PULSAR_THRESHOLD=${AUTO_MIGRATE_PULSAR_THRESHOLD}
       - MILVUS_ONPREM_ROLLING_MINIO_PEER_RPC_TIMEOUT_S=${ROLLING_MINIO_PEER_RPC_TIMEOUT_S}
       - MILVUS_ONPREM_ROLLING_MINIO_HEALTHY_WAIT_S=${ROLLING_MINIO_HEALTHY_WAIT_S}
+      # MinIO bucket-ensure path. Daemon re-tries milvus-bucket
+      # creation after every rolling MinIO recreate so a wide-pool
+      # cluster initialised with --ha-cluster-size=N gets its bucket
+      # the moment the Nth peer joins (and the wide pool first
+      # reaches quorum). All four are required when MINIO_HA_POOL_SIZE
+      # >= 2; otherwise the legacy per-host-pool layout creates the
+      # bucket at init on a single-host pool.
+      - MILVUS_ONPREM_MINIO_API_PORT=${MINIO_API_PORT}
+      - MILVUS_ONPREM_MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MILVUS_ONPREM_MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MILVUS_ONPREM_MINIO_HA_POOL_SIZE=${MINIO_HA_POOL_SIZE}
     volumes:
       # /join reads cluster.env to build a copy for the joining peer.
       # Read-only — the daemon never edits cluster.env directly.
